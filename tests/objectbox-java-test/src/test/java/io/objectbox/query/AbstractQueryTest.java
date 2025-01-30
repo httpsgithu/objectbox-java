@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 ObjectBox Ltd. All rights reserved.
+ * Copyright 2018-2023 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,8 @@ import java.util.List;
 import io.objectbox.AbstractObjectBoxTest;
 import io.objectbox.Box;
 import io.objectbox.BoxStoreBuilder;
-import io.objectbox.DebugFlags;
 import io.objectbox.TestEntity;
+import io.objectbox.config.DebugFlags;
 
 import javax.annotation.Nullable;
 
@@ -55,11 +55,24 @@ public class AbstractQueryTest extends AbstractObjectBoxTest {
      * <li>simpleFloat = [400.0..400.9]</li>
      * <li>simpleDouble = [2020.00..2020.09] (approximately)</li>
      * <li>simpleByteArray = [{1,2,2000}..{1,2,2009}]</li>
+     * <li>shortArray = [{-2100,2100}..{-2109,2109}]</li>
+     * <li>intArray = [{-2000,2000}..{-2009,2009}]</li>
+     * <li>longArray = [{-3000,3000}..{-3009,3009}]</li>
+     * <li>floatArray = [{-400.0,400.0}..{-400.9,400.9}]</li>
+     * <li>doubleArray = [{-2020.00,2020.00}..{-2020.09,2020.09}] (approximately)</li>
+     * <li>date = [Date(3000)..Date(3009)]</li>
      */
     public List<TestEntity> putTestEntitiesScalars() {
         return putTestEntities(10, null, 2000);
     }
 
+    /**
+     * Puts 5 TestEntity starting at nr 1 using {@link AbstractObjectBoxTest#createTestEntity(String, int)}.
+     * <li>simpleString = banana, apple, bar, banana milk shake, foo bar</li>
+     * <li>simpleStringArray = [simpleString]</li>
+     * <li>simpleStringList = [simpleString]</li>
+     * <li>charArray = simpleString.toCharArray()</li>
+     */
     List<TestEntity> putTestEntitiesStrings() {
         List<TestEntity> entities = new ArrayList<>();
         entities.add(createTestEntity("banana", 1));

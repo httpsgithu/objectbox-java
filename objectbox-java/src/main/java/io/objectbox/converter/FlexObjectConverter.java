@@ -1,8 +1,20 @@
-package io.objectbox.converter;
+/*
+ * Copyright 2021-2024 ObjectBox Ltd. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
-import io.objectbox.flatbuffers.ArrayReadWriteBuf;
-import io.objectbox.flatbuffers.FlexBuffers;
-import io.objectbox.flatbuffers.FlexBuffersBuilder;
+package io.objectbox.converter;
 
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
@@ -11,6 +23,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+
+import io.objectbox.flatbuffers.ArrayReadWriteBuf;
+import io.objectbox.flatbuffers.FlexBuffers;
+import io.objectbox.flatbuffers.FlexBuffersBuilder;
 
 /**
  * Converts between {@link Object} properties and byte arrays using FlexBuffers.
@@ -110,12 +126,14 @@ public class FlexObjectConverter implements PropertyConverter<Object, byte[]> {
         for (Map.Entry<Object, Object> entry : map.entrySet()) {
             Object rawKey = entry.getKey();
             Object value = entry.getValue();
-            if (rawKey == null || value == null) {
-                throw new IllegalArgumentException("Map keys or values must not be null");
+            if (rawKey == null) {
+                throw new IllegalArgumentException("Map keys must not be null");
             }
             checkMapKeyType(rawKey);
             String key = rawKey.toString();
-            if (value instanceof Map) {
+            if (value == null) {
+                builder.putNull(key);
+            } else if (value instanceof Map) {
                 //noinspection unchecked
                 addMap(builder, key, (Map<Object, Object>) value);
             } else if (value instanceof List) {
@@ -155,9 +173,8 @@ public class FlexObjectConverter implements PropertyConverter<Object, byte[]> {
 
         for (Object item : list) {
             if (item == null) {
-                throw new IllegalArgumentException("List elements must not be null");
-            }
-            if (item instanceof Map) {
+                builder.putNull();
+            } else if (item instanceof Map) {
                 //noinspection unchecked
                 addMap(builder, null, (Map<Object, Object>) item);
             } else if (item instanceof List) {
@@ -197,7 +214,9 @@ public class FlexObjectConverter implements PropertyConverter<Object, byte[]> {
         if (databaseValue == null) return null;
 
         FlexBuffers.Reference value = FlexBuffers.getRoot(new ArrayReadWriteBuf(databaseValue, databaseValue.length));
-        if (value.isMap()) {
+        if (value.isNull()) {
+            return null;
+        } else if (value.isMap()) {
             return buildMap(value.asMap());
         } else if (value.isVector()) {
             return buildList(value.asVector());
@@ -261,7 +280,9 @@ public class FlexObjectConverter implements PropertyConverter<Object, byte[]> {
             String rawKey = keys.get(i).toString();
             Object key = convertToKey(rawKey);
             FlexBuffers.Reference value = values.get(i);
-            if (value.isMap()) {
+            if (value.isNull()) {
+                resultMap.put(key, null);
+            } else if (value.isMap()) {
                 resultMap.put(key, buildMap(value.asMap()));
             } else if (value.isVector()) {
                 resultMap.put(key, buildList(value.asVector()));
@@ -298,7 +319,9 @@ public class FlexObjectConverter implements PropertyConverter<Object, byte[]> {
 
         for (int i = 0; i < itemCount; i++) {
             FlexBuffers.Reference item = vector.get(i);
-            if (item.isMap()) {
+            if (item.isNull()) {
+                list.add(null);
+            } else if (item.isMap()) {
                 list.add(buildMap(item.asMap()));
             } else if (item.isVector()) {
                 list.add(buildList(item.asVector()));

@@ -16,11 +16,6 @@
 
 package io.objectbox.internal;
 
-import io.objectbox.BoxStore;
-import org.greenrobot.essentials.io.IoUtils;
-
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
@@ -35,7 +30,14 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.charset.Charset;
 import java.util.Arrays;
+
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+
+import io.objectbox.BoxStore;
+import org.greenrobot.essentials.io.IoUtils;
 
 /**
  * Separate class, so we can mock BoxStore.
@@ -162,7 +164,7 @@ public class NativeLibraryLoader {
                         String cpuArchOS = cpuArchOSOrNull.toLowerCase();
                         if (cpuArchOS.startsWith("armv7")) {
                             cpuArch = "armv7";
-                        } else if (cpuArchOS.startsWith("armv6")){
+                        } else if (cpuArchOS.startsWith("armv6")) {
                             cpuArch = "armv6";
                         } // else use fall back below.
                     } // else use fall back below.
@@ -202,7 +204,8 @@ public class NativeLibraryLoader {
         try {
             // Linux
             Process exec = Runtime.getRuntime().exec("uname -m");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(exec.getInputStream()));
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(exec.getInputStream(), Charset.defaultCharset()));
             archOrNull = reader.readLine();
             reader.close();
         } catch (Exception ignored) {

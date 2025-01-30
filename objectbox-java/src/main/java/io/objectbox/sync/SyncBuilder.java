@@ -1,11 +1,30 @@
+/*
+ * Copyright 2019-2024 ObjectBox Ltd. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.objectbox.sync;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 import javax.annotation.Nullable;
 
 import io.objectbox.BoxStore;
-import io.objectbox.annotation.apihint.Experimental;
+import io.objectbox.annotation.apihint.Internal;
+import io.objectbox.exception.FeatureNotAvailableException;
 import io.objectbox.sync.internal.Platform;
 import io.objectbox.sync.listener.SyncChangeListener;
 import io.objectbox.sync.listener.SyncCompletedListener;
@@ -18,14 +37,13 @@ import io.objectbox.sync.listener.SyncTimeListener;
  * A builder to create a {@link SyncClient}; the builder itself should be created via
  * {@link Sync#client(BoxStore, String, SyncCredentials)}.
  */
-@Experimental
 @SuppressWarnings({"unused", "WeakerAccess"})
-public class SyncBuilder {
+public final class SyncBuilder {
 
     final Platform platform;
     final BoxStore boxStore;
-    final String url;
-    final SyncCredentials credentials;
+    String url;
+    final List<SyncCredentials> credentials;
 
     @Nullable SyncLoginListener loginListener;
     @Nullable SyncCompletedListener completedListener;
@@ -68,19 +86,58 @@ public class SyncBuilder {
         AUTO_NO_PUSHES
     }
 
-    public SyncBuilder(BoxStore boxStore, String url, SyncCredentials credentials) {
-        checkNotNull(boxStore, "BoxStore is required.");
-        checkNotNull(url, "Sync server URL is required.");
-        checkNotNull(credentials, "Sync credentials are required.");
+    private static void checkSyncFeatureAvailable() {
         if (!BoxStore.isSyncAvailable()) {
-            throw new IllegalStateException(
+            throw new FeatureNotAvailableException(
                     "This library does not include ObjectBox Sync. " +
                             "Please visit https://objectbox.io/sync/ for options.");
         }
+    }
+
+
+    @Internal
+    public SyncBuilder(BoxStore boxStore, SyncCredentials credentials) {
+        checkNotNull(boxStore, "BoxStore is required.");
+        checkNotNull(credentials, "Sync credentials are required.");
+        checkSyncFeatureAvailable();
         this.platform = Platform.findPlatform();
         this.boxStore = boxStore;
+        this.credentials = Collections.singletonList(credentials);
+    }
+
+    @Internal
+    public SyncBuilder(BoxStore boxStore, SyncCredentials[] multipleCredentials) {
+        checkNotNull(boxStore, "BoxStore is required.");
+        if (multipleCredentials.length == 0) {
+            throw new IllegalArgumentException("At least one Sync credential is required.");
+        }
+        checkSyncFeatureAvailable();
+        this.platform = Platform.findPlatform();
+        this.boxStore = boxStore;
+        this.credentials = Arrays.asList(multipleCredentials);
+    }
+
+    @Internal
+    public SyncBuilder(BoxStore boxStore, String url, SyncCredentials credentials) {
+        this(boxStore, credentials);
+        checkNotNull(url, "Sync server URL is required.");
         this.url = url;
-        this.credentials = credentials;
+    }
+
+    @Internal
+    public SyncBuilder(BoxStore boxStore, String url, SyncCredentials[] multipleCredentials) {
+        this(boxStore, multipleCredentials);
+        checkNotNull(url, "Sync server URL is required.");
+        this.url = url;
+    }
+
+    /**
+     * Allows internal code to set the Sync server URL after creating this builder.
+     */
+    @Internal
+    SyncBuilder serverUrl(String url) {
+        this.url = url;
+        return this;
     }
 
     /**
@@ -191,6 +248,7 @@ public class SyncBuilder {
         if (boxStore.getSyncClient() != null) {
             throw new IllegalStateException("The given store is already associated with a Sync client, close it first.");
         }
+        checkNotNull(url, "Sync Server URL is required.");
         return new SyncClientImpl(this);
     }
 

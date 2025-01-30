@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,25 @@
 
 package io.objectbox;
 
-import javax.annotation.Nullable;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 
-/** In "real" entity would be annotated with @Entity. */
+import javax.annotation.Nullable;
+
+import io.objectbox.annotation.Entity;
+import io.objectbox.annotation.Id;
+import io.objectbox.annotation.Unsigned;
+
+/**
+ * The annotations in this class have no effect as the Gradle plugin is not configured in this project. However, test
+ * code builds a model like if the annotations were processed.
+ * <p>
+ * There is a matching test in the internal integration test project where this is tested and model builder code can be
+ * "stolen" from.
+ */
+@Entity
 public class TestEntity {
 
     public static final String STRING_VALUE_THROW_IN_CONSTRUCTOR =
@@ -30,7 +43,7 @@ public class TestEntity {
     public static final String EXCEPTION_IN_CONSTRUCTOR_MESSAGE =
             "Hello, this is an exception from TestEntity constructor";
 
-    /** In "real" entity would be annotated with @Id. */
+    @Id
     private long id;
     private boolean simpleBoolean;
     private byte simpleByte;
@@ -45,14 +58,21 @@ public class TestEntity {
     /** Not-null value. */
     private String[] simpleStringArray;
     private List<String> simpleStringList;
-    /** In "real" entity would be annotated with @Unsigned. */
+    @Unsigned
     private short simpleShortU;
-    /** In "real" entity would be annotated with @Unsigned. */
+    @Unsigned
     private int simpleIntU;
-    /** In "real" entity would be annotated with @Unsigned. */
+    @Unsigned
     private long simpleLongU;
     private Map<String, Object> stringObjectMap;
     private Object flexProperty;
+    private short[] shortArray;
+    private char[] charArray;
+    private int[] intArray;
+    private long[] longArray;
+    private float[] floatArray;
+    private double[] doubleArray;
+    private Date date;
 
     transient boolean noArgsConstructorCalled;
 
@@ -64,11 +84,31 @@ public class TestEntity {
         this.id = id;
     }
 
-    public TestEntity(long id, boolean simpleBoolean, byte simpleByte, short simpleShort, int simpleInt,
-                      long simpleLong, float simpleFloat, double simpleDouble, String simpleString,
-                      byte[] simpleByteArray, String[] simpleStringArray, List<String> simpleStringList,
-                      short simpleShortU, int simpleIntU, long simpleLongU, Map<String, Object> stringObjectMap,
-                      Object flexProperty) {
+    public TestEntity(long id,
+                      boolean simpleBoolean,
+                      byte simpleByte,
+                      short simpleShort,
+                      int simpleInt,
+                      long simpleLong,
+                      float simpleFloat,
+                      double simpleDouble,
+                      String simpleString,
+                      byte[] simpleByteArray,
+                      String[] simpleStringArray,
+                      List<String> simpleStringList,
+                      short simpleShortU,
+                      int simpleIntU,
+                      long simpleLongU,
+                      Map<String, Object> stringObjectMap,
+                      Object flexProperty,
+                      short[] shortArray,
+                      char[] charArray,
+                      int[] intArray,
+                      long[] longArray,
+                      float[] floatArray,
+                      double[] doubleArray,
+                      Date date
+    ) {
         this.id = id;
         this.simpleBoolean = simpleBoolean;
         this.simpleByte = simpleByte;
@@ -86,6 +126,13 @@ public class TestEntity {
         this.simpleLongU = simpleLongU;
         this.stringObjectMap = stringObjectMap;
         this.flexProperty = flexProperty;
+        this.shortArray = shortArray;
+        this.charArray = charArray;
+        this.intArray = intArray;
+        this.longArray = longArray;
+        this.floatArray = floatArray;
+        this.doubleArray = doubleArray;
+        this.date = date;
         if (STRING_VALUE_THROW_IN_CONSTRUCTOR.equals(simpleString)) {
             throw new RuntimeException(EXCEPTION_IN_CONSTRUCTOR_MESSAGE);
         }
@@ -239,6 +286,68 @@ public class TestEntity {
         return this;
     }
 
+    @Nullable
+    public short[] getShortArray() {
+        return shortArray;
+    }
+
+    public void setShortArray(@Nullable short[] shortArray) {
+        this.shortArray = shortArray;
+    }
+
+    @Nullable
+    public char[] getCharArray() {
+        return charArray;
+    }
+
+    public void setCharArray(@Nullable char[] charArray) {
+        this.charArray = charArray;
+    }
+
+    @Nullable
+    public int[] getIntArray() {
+        return intArray;
+    }
+
+    public void setIntArray(@Nullable int[] intArray) {
+        this.intArray = intArray;
+    }
+
+    @Nullable
+    public long[] getLongArray() {
+        return longArray;
+    }
+
+    public void setLongArray(@Nullable long[] longArray) {
+        this.longArray = longArray;
+    }
+
+    @Nullable
+    public float[] getFloatArray() {
+        return floatArray;
+    }
+
+    public void setFloatArray(@Nullable float[] floatArray) {
+        this.floatArray = floatArray;
+    }
+
+    @Nullable
+    public double[] getDoubleArray() {
+        return doubleArray;
+    }
+
+    public void setDoubleArray(@Nullable double[] doubleArray) {
+        this.doubleArray = doubleArray;
+    }
+
+    public Date getDate() {
+        return date;
+    }
+
+    public void setDate(Date date) {
+        this.date = date;
+    }
+
     @Override
     public String toString() {
         return "TestEntity{" +
@@ -259,6 +368,13 @@ public class TestEntity {
                 ", simpleLongU=" + simpleLongU +
                 ", stringObjectMap=" + stringObjectMap +
                 ", flexProperty=" + flexProperty +
+                ", shortArray=" + Arrays.toString(shortArray) +
+                ", charArray=" + Arrays.toString(charArray) +
+                ", intArray=" + Arrays.toString(intArray) +
+                ", longArray=" + Arrays.toString(longArray) +
+                ", floatArray=" + Arrays.toString(floatArray) +
+                ", doubleArray=" + Arrays.toString(doubleArray) +
+                ", date=" + date +
                 ", noArgsConstructorCalled=" + noArgsConstructorCalled +
                 '}';
     }

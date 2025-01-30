@@ -1,15 +1,34 @@
+/*
+ * Copyright 2025 ObjectBox Ltd. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.objectbox.query;
 
-import io.objectbox.TestEntity;
-import io.objectbox.TestEntity_;
 import org.junit.Test;
 
-import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import javax.annotation.Nullable;
+
+import io.objectbox.TestEntity;
+import io.objectbox.TestEntity_;
+
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -127,8 +146,8 @@ public class FlexQueryTest extends AbstractQueryTest {
 
         // containsKeyValue only matches if key and value is equal.
         assertContainsKeyValue("banana-string", "banana");
-        assertContainsKeyValue("banana-long", -1L);
-        // containsKeyValue only supports strings and integers.
+        // containsKeyValue only supports strings for now (TODO: until objectbox#1099 functionality is added).
+        // assertContainsKeyValue("banana-long", -1L);
 
         // setParameters works with strings and integers.
         Query<TestEntity> setParamQuery = box.query(
@@ -141,10 +160,10 @@ public class FlexQueryTest extends AbstractQueryTest {
         assertEquals(1, setParamResults.size());
         assertTrue(setParamResults.get(0).getStringObjectMap().containsKey("banana-string"));
 
-        setParamQuery.setParameters("contains", "banana milk shake-long", Long.toString(1));
+        setParamQuery.setParameters("contains", "banana milk shake-string", "banana milk shake");
         setParamResults = setParamQuery.find();
         assertEquals(1, setParamResults.size());
-        assertTrue(setParamResults.get(0).getStringObjectMap().containsKey("banana milk shake-long"));
+        assertTrue(setParamResults.get(0).getStringObjectMap().containsKey("banana milk shake-string"));
     }
 
     private void assertContainsKey(String key) {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2023 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import io.objectbox.AbstractObjectBoxTest;
 import io.objectbox.Box;
 import io.objectbox.BoxStore;
 import io.objectbox.BoxStoreBuilder;
-import io.objectbox.DebugFlags;
+import io.objectbox.config.DebugFlags;
 
 public abstract class AbstractRelationTest extends AbstractObjectBoxTest {
 
@@ -55,16 +55,23 @@ public abstract class AbstractRelationTest extends AbstractObjectBoxTest {
         orderBox.removeAll();
     }
 
+    /**
+     * Puts customer Joe.
+     */
     protected Customer putCustomer() {
+        return putCustomer("Joe");
+    }
+
+    Customer putCustomer(String name) {
         Customer customer = new Customer();
-        customer.setName("Joe");
+        customer.setName(name);
         customerBox.put(customer);
         return customer;
     }
 
     protected Order putOrder(@Nullable Customer customer, @Nullable String text) {
         Order order = new Order();
-        order.setCustomer(customer);
+        order.getCustomer().setTarget(customer);
         order.setText(text);
         orderBox.put(order);
         return order;

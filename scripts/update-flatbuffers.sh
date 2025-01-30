@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Expects FlatBuffers source files in the `../flatbuffers` directory,
+# the Java library in `objectbox-java`, e.g. run this from the root of this repo.
+
 script_dir=$(dirname "$(readlink -f "$0")")
 cd "${script_dir}/.." # move to project root dir or exit on failure
 echo "Running in directory: $(pwd)"
 
-src="../flatbuffers/java/com/google/flatbuffers"
+src="../flatbuffers/java/src/main/java/com/google/flatbuffers"
 dest="objectbox-java/src/main/java/io/objectbox/flatbuffers"
 
 echo "Copying flatbuffers Java sources"

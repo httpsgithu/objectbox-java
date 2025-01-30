@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2020 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@ import io.objectbox.Box;
 import io.objectbox.BoxStore;
 import io.objectbox.InternalAccess;
 import io.objectbox.Property;
+import io.objectbox.annotation.HnswIndex;
+import io.objectbox.exception.NonUniqueResultException;
 import io.objectbox.reactive.DataObserver;
 import io.objectbox.reactive.DataSubscriptionList;
 import io.objectbox.reactive.SubscriptionBuilder;
@@ -38,9 +40,9 @@ import io.objectbox.relation.RelationInfo;
 import io.objectbox.relation.ToOne;
 
 /**
- * A repeatable Query returning the latest matching Objects.
+ * A repeatable Query returning the latest matching objects.
  * <p>
- * Use {@link #find()} or related methods to fetch the latest results from the BoxStore.
+ * Use {@link #find()} or related methods to fetch the latest results from the {@link BoxStore}.
  * <p>
  * Use {@link #property(Property)} to only return values or an aggregate of a single Property.
  * <p>
@@ -55,13 +57,24 @@ public class Query<T> implements Closeable {
 
     native void nativeDestroy(long handle);
 
+    /** Clones the native query, incl. conditions and parameters, and returns a handle to the clone. */
+    native long nativeClone(long handle);
+
     native Object nativeFindFirst(long handle, long cursorHandle);
 
     native Object nativeFindUnique(long handle, long cursorHandle);
 
     native List<T> nativeFind(long handle, long cursorHandle, long offset, long limit) throws Exception;
 
+    native long nativeFindFirstId(long handle, long cursorHandle);
+
+    native long nativeFindUniqueId(long handle, long cursorHandle);
+
     native long[] nativeFindIds(long handle, long cursorHandle, long offset, long limit);
+
+    native List<ObjectWithScore<T>> nativeFindWithScores(long handle, long cursorHandle, long offset, long limit);
+
+    native List<IdWithScore> nativeFindIdsWithScores(long handle, long cursorHandle, long offset, long limit);
 
     native long nativeCount(long handle, long cursorHandle);
 
@@ -101,6 +114,9 @@ public class Query<T> implements Closeable {
     native void nativeSetParameter(long handle, int entityId, int propertyId, @Nullable String parameterAlias,
                                    byte[] value);
 
+    native void nativeSetParameter(long handle, int entityId, int propertyId, @Nullable String parameterAlias,
+                                    float[] values);
+
     final Box<T> box;
     private final BoxStore store;
     private final QueryPublisher<T> publisher;
@@ -110,9 +126,10 @@ public class Query<T> implements Closeable {
     private final int queryAttempts;
     private static final int INITIAL_RETRY_BACK_OFF_IN_MS = 10;
 
-    long handle;
+    // volatile so checkOpen() is more up-to-date (no need for synchronized; it's a race anyway)
+    volatile long handle;
 
-    Query(Box<T> box, long queryHandle, @Nullable List<EagerRelation<T, ?>> eagerRelations, @Nullable  QueryFilter<T> filter,
+    Query(Box<T> box, long queryHandle, @Nullable List<EagerRelation<T, ?>> eagerRelations, @Nullable QueryFilter<T> filter,
           @Nullable Comparator<T> comparator) {
         this.box = box;
         store = box.getStore();
@@ -122,6 +139,20 @@ public class Query<T> implements Closeable {
         this.eagerRelations = eagerRelations;
         this.filter = filter;
         this.comparator = comparator;
+    }
+
+    /**
+     * Creates a copy of the {@code originalQuery}, but pointing to a different native query using {@code handle}.
+     */
+    // Note: not using recommended copy constructor (just passing this) as handle needs to change.
+    private Query(Query<T> originalQuery, long handle) {
+        this(
+                originalQuery.box,
+                handle,
+                originalQuery.eagerRelations,
+                originalQuery.filter,
+                originalQuery.comparator
+        );
     }
 
     /**
@@ -135,7 +166,12 @@ public class Query<T> implements Closeable {
     }
 
     /**
-     * If possible, try to close the query once you are done with it to reclaim resources immediately.
+     * Closes this query and frees used resources.
+     * <p>
+     * If possible, call this always once done with this. Otherwise, will be called once this is finalized (e.g. garbage
+     * collected).
+     * <p>
+     * Calling any other methods of this afterwards will throw an {@link IllegalStateException}.
      */
     public synchronized void close() {
         if (handle != 0) {
@@ -146,13 +182,34 @@ public class Query<T> implements Closeable {
         }
     }
 
+    /**
+     * Creates a copy of this for use in another thread.
+     * <p>
+     * Clones the native query, keeping any previously set parameters.
+     * <p>
+     * Closing the original query does not close the copy. {@link #close()} the copy once finished using it.
+     * <p>
+     * Note: a set {@link QueryBuilder#filter(QueryFilter) filter} or {@link QueryBuilder#sort(Comparator) sort}
+     * order <b>must be thread safe</b>.
+     */
+    // Note: not overriding clone() to avoid confusion with Java's cloning mechanism.
+    public Query<T> copy() {
+        long cloneHandle = nativeClone(handle);
+        return new Query<>(this, cloneHandle);
+    }
+
     /** To be called inside a read TX */
     long cursorHandle() {
         return InternalAccess.getActiveTxCursorHandle(box);
     }
 
     /**
-     * Find the first Object matching the query.
+     * Finds the first object matching this query.
+     * <p>
+     * Note: if no {@link QueryBuilder#order} conditions are present, which object is the first one might be arbitrary
+     * (sometimes the one with the lowest ID, but never guaranteed to be).
+     *
+     * @return The first object if there are matches. {@code null} if no object matches.
      */
     @Nullable
     public T findFirst() {
@@ -185,9 +242,10 @@ public class Query<T> implements Closeable {
     }
 
     /**
-     * Find the unique Object matching the query.
+     * Finds the only object matching this query.
      *
-     * @throws io.objectbox.exception.NonUniqueResultException if result was not unique
+     * @return The object if a single object matches. {@code null} if no object matches. Throws
+     * {@link NonUniqueResultException} if there are multiple objects matching the query.
      */
     @Nullable
     public T findUnique() {
@@ -201,7 +259,12 @@ public class Query<T> implements Closeable {
     }
 
     /**
-     * Find all Objects matching the query.
+     * Finds objects matching the query.
+     * <p>
+     * Note: if no {@link QueryBuilder#order} conditions are present, the order is arbitrary (sometimes ordered by ID,
+     * but never guaranteed to).
+     *
+     * @return A list of matching objects. An empty list if no object matches.
      */
     @Nonnull
     public List<T> find() {
@@ -225,8 +288,12 @@ public class Query<T> implements Closeable {
     }
 
     /**
-     * Find all Objects matching the query, skipping the first offset results and returning at most limit results.
-     * Use this for pagination.
+     * Like {@link #find()}, but can skip and limit results.
+     * <p>
+     * Use to get a slice of the whole result, e.g. for "result paging".
+     *
+     * @param offset If greater than 0, skips this many results.
+     * @param limit If greater than 0, returns at most this many results.
      */
     @Nonnull
     public List<T> find(final long offset, final long limit) {
@@ -239,23 +306,63 @@ public class Query<T> implements Closeable {
     }
 
     /**
-     * Very efficient way to get just the IDs without creating any objects. IDs can later be used to lookup objects
-     * (lookups by ID are also very efficient in ObjectBox).
+     * Like {@link #findFirst()}, but returns just the ID of the object.
      * <p>
-     * Note: a filter set with {@link QueryBuilder#filter(QueryFilter)} will be silently ignored!
+     * This is more efficient as no object is created.
+     * <p>
+     * Ignores any {@link QueryBuilder#filter(QueryFilter) query filter}.
+     *
+     * @return The ID of the first matching object. {@code 0} if no object matches.
      */
-    @Nonnull
-    public long[] findIds() {
-        return findIds(0,0);
+    public long findFirstId() {
+        checkOpen();
+        return box.internalCallWithReaderHandle(cursorHandle -> nativeFindFirstId(handle, cursorHandle));
     }
 
     /**
-     * Like {@link #findIds()} but with a offset/limit param, e.g. for pagination.
+     * Like {@link #findUnique()}, but returns just the ID of the object.
+     * <p>
+     * This is more efficient as no object is created.
+     * <p>
+     * Ignores any {@link QueryBuilder#filter(QueryFilter) query filter}.
+     *
+     * @return The ID of the object, if a single object matches. {@code 0} if no object matches. Throws
+     * {@link NonUniqueResultException} if there are multiple objects matching the query.
+     */
+    public long findUniqueId() {
+        checkOpen();
+        return box.internalCallWithReaderHandle(cursorHandle -> nativeFindUniqueId(handle, cursorHandle));
+    }
+
+    /**
+     * Like {@link #find()}, but returns just the IDs of the objects.
+     * <p>
+     * IDs can later be used to {@link Box#get} objects.
+     * <p>
+     * This is very efficient as no objects are created.
      * <p>
      * Note: a filter set with {@link QueryBuilder#filter(QueryFilter)} will be silently ignored!
+     *
+     * @return An array of IDs of matching objects. An empty array if no objects match.
+     */
+    @Nonnull
+    public long[] findIds() {
+        return findIds(0, 0);
+    }
+
+    /**
+     * Like {@link #findIds()}, but can skip and limit results.
+     * <p>
+     * Use to get a slice of the whole result, e.g. for "result paging".
+     * <p>
+     * Note: a filter set with {@link QueryBuilder#filter(QueryFilter)} will be silently ignored!
+     *
+     * @param offset If greater than 0, skips this many results.
+     * @param limit If greater than 0, returns at most this many results.
      */
     @Nonnull
     public long[] findIds(final long offset, final long limit) {
+        checkOpen();
         return box.internalCallWithReaderHandle(cursorHandle -> nativeFindIds(handle, cursorHandle, offset, limit));
     }
 
@@ -282,6 +389,68 @@ public class Query<T> implements Closeable {
     }
 
     /**
+     * Like {@link #findIdsWithScores()}, but can skip and limit results.
+     * <p>
+     * Use to get a slice of the whole result, e.g. for "result paging".
+     *
+     * @param offset If greater than 0, skips this many results.
+     * @param limit If greater than 0, returns at most this many results.
+     */
+    @Nonnull
+    public List<IdWithScore> findIdsWithScores(final long offset, final long limit) {
+        checkOpen();
+        return box.internalCallWithReaderHandle(cursorHandle -> nativeFindIdsWithScores(handle, cursorHandle, offset, limit));
+    }
+
+    /**
+     * Finds IDs of objects matching the query associated to their query score (e.g. distance in NN search).
+     * <p>
+     * This only works on objects with a property with an {@link HnswIndex}.
+     *
+     * @return A list of {@link IdWithScore} that wraps IDs of matching objects and their score, sorted by score in
+     * ascending order.
+     */
+    @Nonnull
+    public List<IdWithScore> findIdsWithScores() {
+        return findIdsWithScores(0, 0);
+    }
+
+    /**
+     * Like {@link #findWithScores()}, but can skip and limit results.
+     * <p>
+     * Use to get a slice of the whole result, e.g. for "result paging".
+     *
+     * @param offset If greater than 0, skips this many results.
+     * @param limit If greater than 0, returns at most this many results.
+     */
+    @Nonnull
+    public List<ObjectWithScore<T>> findWithScores(final long offset, final long limit) {
+        ensureNoFilterNoComparator();
+        return callInReadTx(() -> {
+            List<ObjectWithScore<T>> results = nativeFindWithScores(handle, cursorHandle(), offset, limit);
+            if (eagerRelations != null) {
+                for (int i = 0; i < results.size(); i++) {
+                    resolveEagerRelationForNonNullEagerRelations(results.get(i).get(), i);
+                }
+            }
+            return results;
+        });
+    }
+
+    /**
+     * Finds objects matching the query associated to their query score (e.g. distance in NN search).
+     * <p>
+     * This only works on objects with a property with an {@link HnswIndex}.
+     *
+     * @return A list of {@link ObjectWithScore} that wraps matching objects and their score, sorted by score in
+     * ascending order.
+     */
+    @Nonnull
+    public List<ObjectWithScore<T>> findWithScores() {
+        return findWithScores(0, 0);
+    }
+
+    /**
      * Creates a {@link PropertyQuery} for the given property.
      * <p>
      * A {@link PropertyQuery} uses the same conditions as this Query object,
@@ -294,6 +463,7 @@ public class Query<T> implements Closeable {
     }
 
     <R> R callInReadTx(Callable<R> callable) {
+        checkOpen();
         return store.callInReadTxWithRetry(callable, queryAttempts, INITIAL_RETRY_BACK_OFF_IN_MS, true);
     }
 
@@ -308,6 +478,7 @@ public class Query<T> implements Closeable {
      */
     public void forEach(final QueryConsumer<T> consumer) {
         ensureNoComparator();
+        checkOpen(); // findIds also checks, but throw early outside of transaction.
         box.getStore().runInReadTx(() -> {
             LazyList<T> lazyList = new LazyList<>(box, findIds(), false);
             int size = lazyList.size();
@@ -384,6 +555,7 @@ public class Query<T> implements Closeable {
 
     /** Returns the count of Objects matching the query. */
     public long count() {
+        checkOpen();
         ensureNoFilter();
         return box.internalCallWithReaderHandle(cursorHandle -> nativeCount(handle, cursorHandle));
     }
@@ -392,16 +564,19 @@ public class Query<T> implements Closeable {
      * Sets a parameter previously given to the {@link QueryBuilder} to a new value.
      */
     public Query<T> setParameter(Property<?> property, String value) {
+        checkOpen();
         nativeSetParameter(handle, property.getEntityId(), property.getId(), null, value);
         return this;
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to a new value.
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new value to use for the query condition.
      */
     public Query<T> setParameter(String alias, String value) {
+        checkOpen();
         nativeSetParameter(handle, 0, 0, alias, value);
         return this;
     }
@@ -410,16 +585,19 @@ public class Query<T> implements Closeable {
      * Sets a parameter previously given to the {@link QueryBuilder} to a new value.
      */
     public Query<T> setParameter(Property<?> property, long value) {
+        checkOpen();
         nativeSetParameter(handle, property.getEntityId(), property.getId(), null, value);
         return this;
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to a new value.
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new value to use for the query condition.
      */
     public Query<T> setParameter(String alias, long value) {
+        checkOpen();
         nativeSetParameter(handle, 0, 0, alias, value);
         return this;
     }
@@ -428,16 +606,19 @@ public class Query<T> implements Closeable {
      * Sets a parameter previously given to the {@link QueryBuilder} to a new value.
      */
     public Query<T> setParameter(Property<?> property, double value) {
+        checkOpen();
         nativeSetParameter(handle, property.getEntityId(), property.getId(), null, value);
         return this;
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to a new value.
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new value to use for the query condition.
      */
     public Query<T> setParameter(String alias, double value) {
+        checkOpen();
         nativeSetParameter(handle, 0, 0, alias, value);
         return this;
     }
@@ -452,9 +633,10 @@ public class Query<T> implements Closeable {
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to a new value.
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new value to use for the query condition.
      * @throws NullPointerException if given date is null
      */
     public Query<T> setParameter(String alias, Date value) {
@@ -469,118 +651,236 @@ public class Query<T> implements Closeable {
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to a new value.
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new value to use for the query condition.
      */
     public Query<T> setParameter(String alias, boolean value) {
         return setParameter(alias, value ? 1 : 0);
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to new values.
+     * Changes the parameter of the query condition for {@code property} to a new {@code value}.
+     *
+     * @param property Property reference from generated entity underscore class, like {@code Example_.example}.
+     * @param value The new {@code int[]} value to use for the query condition.
      */
-    public Query<T> setParameters(Property<?> property, long value1, long value2) {
-        nativeSetParameters(handle, property.getEntityId(), property.getId(), null, value1, value2);
+    public Query<T> setParameter(Property<?> property, int[] value) {
+        checkOpen();
+        nativeSetParameters(handle, property.getEntityId(), property.getId(), null, value);
+        return this;
+    }
+
+    /**
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
+     *
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new {@code int[]} value to use for the query condition.
+     */
+    public Query<T> setParameter(String alias, int[] value) {
+        checkOpen();
+        nativeSetParameters(handle, 0, 0, alias, value);
+        return this;
+    }
+
+    /**
+     * Changes the parameter of the query condition for {@code property} to a new {@code value}.
+     *
+     * @param property Property reference from generated entity underscore class, like {@code Example_.example}.
+     * @param value The new {@code long[]} value to use for the query condition.
+     */
+    public Query<T> setParameter(Property<?> property, long[] value) {
+        checkOpen();
+        nativeSetParameters(handle, property.getEntityId(), property.getId(), null, value);
+        return this;
+    }
+
+    /**
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
+     *
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new {@code long[]} value to use for the query condition.
+     */
+    public Query<T> setParameter(String alias, long[] value) {
+        checkOpen();
+        nativeSetParameters(handle, 0, 0, alias, value);
+        return this;
+    }
+
+    /**
+     * Changes the parameter of the query condition for {@code property} to a new {@code value}.
+     *
+     * @param property Property reference from generated entity underscore class, like {@code Example_.example}.
+     * @param value The new {@code float[]} value to use for the query condition.
+     */
+    public Query<T> setParameter(Property<?> property, float[] value) {
+        checkOpen();
+        nativeSetParameter(handle, property.getEntityId(), property.getId(), null, value);
+        return this;
+    }
+
+    /**
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
+     *
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new {@code float[]} value to use for the query condition.
+     */
+    public Query<T> setParameter(String alias, float[] value) {
+        checkOpen();
+        nativeSetParameter(handle, 0, 0, alias, value);
+        return this;
+    }
+
+    /**
+     * Changes the parameter of the query condition for {@code property} to a new {@code value}.
+     *
+     * @param property Property reference from generated entity underscore class, like {@code Example_.example}.
+     * @param value The new {@code String[]} value to use for the query condition.
+     */
+    public Query<T> setParameter(Property<?> property, String[] value) {
+        checkOpen();
+        nativeSetParameters(handle, property.getEntityId(), property.getId(), null, value);
+        return this;
+    }
+
+    /**
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
+     *
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new {@code String[]} value to use for the query condition.
+     */
+    public Query<T> setParameter(String alias, String[] value) {
+        checkOpen();
+        nativeSetParameters(handle, 0, 0, alias, value);
         return this;
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
+     */
+    public Query<T> setParameters(Property<?> property, long value1, long value2) {
+        checkOpen();
+        nativeSetParameters(handle, property.getEntityId(), property.getId(), null, value1, value2);
+        return this;
+    }
+
+    /**
+     * Changes the parameters of the query condition with the matching {@code alias} to the new values.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value1 The first value to use for the query condition.
+     * @param value2 The second value to use for the query condition.
      */
     public Query<T> setParameters(String alias, long value1, long value2) {
+        checkOpen();
         nativeSetParameters(handle, 0, 0, alias, value1, value2);
         return this;
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
+     *
+     * @deprecated Use {@link #setParameter(Property, int[])} instead.
      */
+    @Deprecated
     public Query<T> setParameters(Property<?> property, int[] values) {
-        nativeSetParameters(handle, property.getEntityId(), property.getId(), null, values);
-        return this;
+        return setParameter(property, values);
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
      *
      * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @deprecated Use {@link #setParameter(String, int[])} instead.
      */
+    @Deprecated
     public Query<T> setParameters(String alias, int[] values) {
-        nativeSetParameters(handle, 0, 0, alias, values);
-        return this;
+        return setParameter(alias, values);
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
+     *
+     * @deprecated Use {@link #setParameter(Property, long[])} instead.
      */
+    @Deprecated
     public Query<T> setParameters(Property<?> property, long[] values) {
-        nativeSetParameters(handle, property.getEntityId(), property.getId(), null, values);
-        return this;
+        return setParameter(property, values);
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
      *
      * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @deprecated Use {@link #setParameter(String, long[])} instead.
      */
+    @Deprecated
     public Query<T> setParameters(String alias, long[] values) {
-        nativeSetParameters(handle, 0, 0, alias, values);
-        return this;
+        return setParameter(alias, values);
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
      */
     public Query<T> setParameters(Property<?> property, double value1, double value2) {
+        checkOpen();
         nativeSetParameters(handle, property.getEntityId(), property.getId(), null, value1, value2);
         return this;
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to new values.
+     * Changes the parameters of the query condition with the matching {@code alias} to the new values.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value1 The first value to use for the query condition.
+     * @param value2 The second value to use for the query condition.
      */
     public Query<T> setParameters(String alias, double value1, double value2) {
+        checkOpen();
         nativeSetParameters(handle, 0, 0, alias, value1, value2);
         return this;
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
+     *
+     * @deprecated Use {@link #setParameter(Property, String[])} instead.
      */
+    @Deprecated
     public Query<T> setParameters(Property<?> property, String[] values) {
-        nativeSetParameters(handle, property.getEntityId(), property.getId(), null, values);
-        return this;
+        return setParameter(property, values);
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
      *
      * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @deprecated Use {@link #setParameter(String, String[])} instead.
      */
+    @Deprecated
     public Query<T> setParameters(String alias, String[] values) {
-        nativeSetParameters(handle, 0, 0, alias, values);
-        return this;
+        return setParameter(alias, values);
     }
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
      */
     public Query<T> setParameters(Property<?> property, String key, String value) {
+        checkOpen();
         nativeSetParameters(handle, property.getEntityId(), property.getId(), null, key, value);
         return this;
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to new values.
+     * Changes the parameters of the query condition with the matching {@code alias} to the new values.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param key The first value to use for the query condition.
+     * @param value The second value to use for the query condition.
      */
     public Query<T> setParameters(String alias, String key, String value) {
+        checkOpen();
         nativeSetParameters(handle, 0, 0, alias, key, value);
         return this;
     }
@@ -589,16 +889,19 @@ public class Query<T> implements Closeable {
      * Sets a parameter previously given to the {@link QueryBuilder} to new values.
      */
     public Query<T> setParameter(Property<?> property, byte[] value) {
+        checkOpen();
         nativeSetParameter(handle, property.getEntityId(), property.getId(), null, value);
         return this;
     }
 
     /**
-     * Sets a parameter previously given to the {@link QueryBuilder} to new values.
+     * Changes the parameter of the query condition with the matching {@code alias} to a new {@code value}.
      *
-     * @param alias as defined using {@link QueryBuilder#parameterAlias(String)}.
+     * @param alias as defined using {@link PropertyQueryCondition#alias(String)}.
+     * @param value The new value to use for the query condition.
      */
     public Query<T> setParameter(String alias, byte[] value) {
+        checkOpen();
         nativeSetParameter(handle, 0, 0, alias, value);
         return this;
     }
@@ -609,6 +912,7 @@ public class Query<T> implements Closeable {
      * @return count of removed Objects
      */
     public long remove() {
+        checkOpen();
         ensureNoFilter();
         return box.internalCallWithWriterHandle(cursorHandle -> nativeRemove(handle, cursorHandle));
     }
@@ -632,6 +936,7 @@ public class Query<T> implements Closeable {
      * it may be GCed and observers may become stale (won't receive anymore data).
      */
     public SubscriptionBuilder<List<T>> subscribe() {
+        checkOpen();
         return new SubscriptionBuilder<>(publisher, null);
     }
 
@@ -663,6 +968,7 @@ public class Query<T> implements Closeable {
      * Note: the format of the returned string may change without notice.
      */
     public String describe() {
+        checkOpen();
         return nativeToString(handle);
     }
 
@@ -673,7 +979,17 @@ public class Query<T> implements Closeable {
      * Note: the format of the returned string may change without notice.
      */
     public String describeParameters() {
+        checkOpen();
         return nativeDescribeParameters(handle);
+    }
+
+    /**
+     * Throws if {@link #close()} has been called for this.
+     */
+    private void checkOpen() {
+        if (handle == 0) {
+            throw new IllegalStateException("This query is closed. Build and use a new one.");
+        }
     }
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,11 @@
 
 package io.objectbox;
 
-import io.objectbox.exception.DbException;
-import io.objectbox.exception.DbExceptionListener;
-import io.objectbox.exception.DbMaxReadersExceededException;
 import org.junit.Ignore;
 import org.junit.Test;
+import org.junit.function.ThrowingRunnable;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -32,6 +31,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import io.objectbox.exception.DbException;
+import io.objectbox.exception.DbExceptionListener;
+import io.objectbox.exception.DbMaxReadersExceededException;
+import io.objectbox.query.Query;
+
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -39,8 +45,10 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeFalse;
 
 public class TransactionTest extends AbstractObjectBoxTest {
 
@@ -162,28 +170,28 @@ public class TransactionTest extends AbstractObjectBoxTest {
         transaction.abort();
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void testCreateCursorAfterAbortException() {
         Transaction tx = store.beginReadTx();
         tx.abort();
-        tx.createKeyValueCursor();
+        IllegalStateException ex = assertThrows(IllegalStateException.class, tx::createKeyValueCursor);
+        assertTrue(ex.getMessage().contains("TX is not active anymore"));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void testCommitAfterAbortException() {
         Transaction tx = store.beginTx();
         tx.abort();
-        tx.commit();
+        IllegalStateException ex = assertThrows(IllegalStateException.class, tx::commit);
+        assertTrue(ex.getMessage().contains("TX is not active anymore"));
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void testCommitReadTxException() {
         Transaction tx = store.beginReadTx();
-        try {
-            tx.commit();
-        } finally {
-            tx.abort();
-        }
+        IllegalStateException ex = assertThrows(IllegalStateException.class, tx::commit);
+        assertEquals("Read transactions may not be committed - use abort instead", ex.getMessage());
+        tx.abort();
     }
 
     @Test
@@ -192,18 +200,19 @@ public class TransactionTest extends AbstractObjectBoxTest {
         DbExceptionListener exceptionListener = e -> exs[0] = e;
         Transaction tx = store.beginReadTx();
         store.setDbExceptionListener(exceptionListener);
-        try {
-            tx.commit();
-            fail("Should have thrown");
-        } catch (IllegalStateException e) {
-            tx.abort();
-            assertSame(e, exs[0]);
-        }
+        IllegalStateException e = assertThrows(IllegalStateException.class, tx::commit);
+        tx.abort();
+        assertSame(e, exs[0]);
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void testCancelExceptionOutsideDbExceptionListener() {
-        DbExceptionListener.cancelCurrentException();
+        IllegalStateException e = assertThrows(
+                IllegalStateException.class,
+                DbExceptionListener::cancelCurrentException
+        );
+        assertEquals("Canceling Java exceptions can only be done from inside exception listeners",
+                e.getMessage());
     }
 
     @Test
@@ -289,16 +298,75 @@ public class TransactionTest extends AbstractObjectBoxTest {
         assertFalse(tx.isClosed());
         tx.close();
         assertTrue(tx.isClosed());
+        assertFalse(tx.isActive());
 
         // Double close should be fine
         tx.close();
 
-        try {
-            tx.reset();
-            fail("Should have thrown");
-        } catch (IllegalStateException e) {
-            // OK
+        // Calling other methods should throw.
+        assertThrowsTxClosed(tx::commit);
+        assertThrowsTxClosed(tx::commitAndClose);
+        assertThrowsTxClosed(tx::abort);
+        assertThrowsTxClosed(tx::reset);
+        assertThrowsTxClosed(tx::recycle);
+        assertThrowsTxClosed(tx::renew);
+        assertThrowsTxClosed(tx::createKeyValueCursor);
+        assertThrowsTxClosed(() -> tx.createCursor(TestEntity.class));
+        assertThrowsTxClosed(tx::isRecycled);
+    }
+
+    private void assertThrowsTxClosed(ThrowingRunnable runnable) {
+        IllegalStateException ex = assertThrows(IllegalStateException.class, runnable);
+        assertEquals("Transaction is closed", ex.getMessage());
+    }
+
+    @Test
+    public void nativeCallInTx_storeIsClosed_throws() throws InterruptedException {
+        // Ignore test on Windows, it was observed to crash with EXCEPTION_ACCESS_VIOLATION
+        assumeFalse(TestUtils.isWindows());
+
+        System.out.println("NOTE This test will cause \"Transaction is still active\" and \"Irrecoverable memory error\" error logs!");
+
+        CountDownLatch callableIsReady = new CountDownLatch(1);
+        CountDownLatch storeIsClosed = new CountDownLatch(1);
+        CountDownLatch callableIsDone = new CountDownLatch(1);
+        AtomicReference<Exception> callableException = new AtomicReference<>();
+
+        // Goal: be just passed closed checks on the Java side, about to call a native query API.
+        // Then close the Store, then call the native API. The native API call should not crash the VM.
+        Callable<Void> waitingCallable = () -> {
+            Box<TestEntity> box = store.boxFor(TestEntity.class);
+            Query<TestEntity> query = box.query().build();
+            // Obtain Cursor handle before closing the Store as getActiveTxCursor() has a closed check
+            long cursorHandle = InternalAccess.getActiveTxCursorHandle(box);
+            
+            callableIsReady.countDown();
+            try {
+                if (!storeIsClosed.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Store did not close within 5 seconds");
+                }
+                // Call native query API within the transaction (opened by callInReadTx below)
+                io.objectbox.query.InternalAccess.nativeFindFirst(query, cursorHandle);
+                query.close();
+            } catch (Exception e) {
+                callableException.set(e);
+            }
+            callableIsDone.countDown();
+            return null;
+        };
+        new Thread(() -> store.callInReadTx(waitingCallable)).start();
+
+        callableIsReady.await();
+        store.close();
+        storeIsClosed.countDown();
+
+        if (!callableIsDone.await(10, TimeUnit.SECONDS)) {
+            fail("Callable did not finish within 10 seconds");
         }
+        Exception exception = callableException.get();
+        assertTrue(exception instanceof IllegalStateException);
+        // Note: the "State" at the end of the message may be different depending on platform, so only assert prefix
+        assertTrue(exception.getMessage().startsWith("Illegal Store instance detected! This is a severe usage error that must be fixed."));
     }
 
     @Test
@@ -375,9 +443,13 @@ public class TransactionTest extends AbstractObjectBoxTest {
         });
     }
 
-    @Test(expected = DbException.class)
+    @Test
     public void testRunInReadTx_putFails() {
-        store.runInReadTx(() -> getTestEntityBox().put(new TestEntity()));
+        DbException e = assertThrows(
+                DbException.class,
+                () -> store.runInReadTx(() -> getTestEntityBox().put(new TestEntity()))
+        );
+        assertEquals("Cannot put in read transaction", e.getMessage());
     }
 
     @Test
@@ -521,5 +593,67 @@ public class TransactionTest extends AbstractObjectBoxTest {
         for (Future<Integer> txTask : txTasks) {
             txTask.get(1, TimeUnit.MINUTES);  // 1s would be enough for normally, but use 1 min to allow debug sessions
         }
+    }
+
+    @Test
+    public void runInTx_forwardsException() {
+        // Exception from callback is forwarded.
+        RuntimeException e = assertThrows(
+                RuntimeException.class,
+                () -> store.runInTx(() -> {
+                    throw new RuntimeException("Thrown inside callback");
+                })
+        );
+        assertEquals("Thrown inside callback", e.getMessage());
+
+        // Can create a new transaction afterward.
+        store.runInTx(() -> store.boxFor(TestEntity.class).count());
+    }
+
+    @Test
+    public void runInReadTx_forwardsException() {
+        // Exception from callback is forwarded.
+        RuntimeException e = assertThrows(
+                RuntimeException.class,
+                () -> store.runInReadTx(() -> {
+                    throw new RuntimeException("Thrown inside callback");
+                })
+        );
+        assertEquals("Thrown inside callback", e.getMessage());
+
+        // Can create a new transaction afterward.
+        store.runInReadTx(() -> store.boxFor(TestEntity.class).count());
+    }
+
+    @Test
+    public void callInTx_forwardsException() throws Exception {
+        // Exception from callback is forwarded.
+        Exception e = assertThrows(
+                Exception.class,
+                () -> store.callInTx(() -> {
+                    throw new Exception("Thrown inside callback");
+                })
+        );
+        assertEquals("Thrown inside callback", e.getMessage());
+
+        // Can create a new transaction afterward.
+        store.callInTx(() -> store.boxFor(TestEntity.class).count());
+    }
+
+    @Test
+    public void callInReadTx_forwardsException() {
+        // Exception from callback is forwarded, but wrapped inside a RuntimeException.
+        RuntimeException e = assertThrows(
+                RuntimeException.class,
+                () -> store.callInReadTx(() -> {
+                    throw new IOException("Thrown inside callback");
+                })
+        );
+        assertEquals("Callable threw exception", e.getMessage());
+        assertTrue(e.getCause() instanceof IOException);
+        assertEquals("Thrown inside callback", e.getCause().getMessage());
+
+        // Can create a new transaction afterward.
+        store.callInReadTx(() -> store.boxFor(TestEntity.class).count());
     }
 }

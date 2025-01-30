@@ -1,9 +1,12 @@
-apply plugin: 'java-library'
-apply plugin: "com.github.spotbugs"
+plugins {
+    id("java-library")
+    id("objectbox-publish")
+    id("com.github.spotbugs")
+}
 
 // Note: use release flag instead of sourceCompatibility and targetCompatibility to ensure only JDK 8 API is used.
 // https://docs.gradle.org/current/userguide/building_java_projects.html#sec:java_cross_compilation
-tasks.withType(JavaCompile) {
+tasks.withType(JavaCompile).configureEach {
     options.release.set(8)
 }
 
@@ -13,16 +16,23 @@ ext {
 
 dependencies {
     api project(':objectbox-java-api')
-    implementation "org.greenrobot:essentials:$essentials_version"
+    implementation "org.greenrobot:essentials:$essentialsVersion"
     api 'com.google.code.findbugs:jsr305:3.0.2'
 
     // https://github.com/spotbugs/spotbugs/blob/master/CHANGELOG.md
-    compileOnly 'com.github.spotbugs:spotbugs-annotations:4.2.2'
+    compileOnly 'com.github.spotbugs:spotbugs-annotations:4.7.3'
 }
 
 spotbugs {
     ignoreFailures = true
+    showStackTraces = true
     excludeFilter = file("spotbugs-exclude.xml")
+}
+
+tasks.spotbugsMain {
+    reports.create("html") {
+        required.set(true)
+    }
 }
 
 javadoc {
@@ -40,7 +50,7 @@ javadoc {
 }
 
 // Note: use packageJavadocForWeb to get as ZIP.
-task javadocForWeb(type: Javadoc) {
+tasks.register('javadocForWeb', Javadoc) {
     group = 'documentation'
     description = 'Builds Javadoc incl. objectbox-java-api classes with web tweaks.'
 
@@ -58,9 +68,10 @@ task javadocForWeb(type: Javadoc) {
         exclude("**/io/objectbox/ModelBuilder.java")
         exclude("**/io/objectbox/Properties.java")
         exclude("**/io/objectbox/Transaction.java")
-        exclude("**/io/objectbox/model/**")
+        exclude("**/io/objectbox/flatbuffers/**")
         exclude("**/io/objectbox/ideasonly/**")
         exclude("**/io/objectbox/internal/**")
+        exclude("**/io/objectbox/model/**")
         exclude("**/io/objectbox/reactive/DataPublisherUtils.java")
         exclude("**/io/objectbox/reactive/WeakDataObserver.java")
     }
@@ -71,7 +82,7 @@ task javadocForWeb(type: Javadoc) {
 
     title = "ObjectBox Java ${version} API"
     options.overview = "$projectDir/src/web/overview.html"
-    options.bottom = 'Available under the Apache License, Version 2.0 - <i>Copyright &#169; 2017-2021 <a href="https://objectbox.io/">ObjectBox Ltd</a>. All Rights Reserved.</i>'
+    options.bottom = 'Available under the Apache License, Version 2.0 - <i>Copyright &#169; 2017-2024 <a href="https://objectbox.io/">ObjectBox Ltd</a>. All Rights Reserved.</i>'
 
     doLast {
         // Note: frequently check the vanilla stylesheet.css if values still match.
@@ -103,7 +114,8 @@ task javadocForWeb(type: Javadoc) {
     }
 }
 
-task packageJavadocForWeb(type: Zip, dependsOn: javadocForWeb) {
+tasks.register('packageJavadocForWeb', Zip) {
+    dependsOn javadocForWeb
     group = 'documentation'
     description = 'Packages Javadoc incl. objectbox-java-api classes with web tweaks as ZIP.'
 
@@ -117,12 +129,13 @@ task packageJavadocForWeb(type: Zip, dependsOn: javadocForWeb) {
     }
 }
 
-task javadocJar(type: Jar, dependsOn: javadoc) {
+tasks.register('javadocJar', Jar) {
+    dependsOn javadoc
     archiveClassifier.set('javadoc')
     from 'build/docs/javadoc'
 }
 
-task sourcesJar(type: Jar) {
+tasks.register('sourcesJar', Jar) {
     from sourceSets.main.allSource
     archiveClassifier.set('sources')
 }

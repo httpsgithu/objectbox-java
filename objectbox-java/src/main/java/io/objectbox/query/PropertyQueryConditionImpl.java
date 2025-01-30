@@ -1,3 +1,19 @@
+/*
+ * Copyright 2020-2024 ObjectBox Ltd. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.objectbox.query;
 
 import java.util.Date;
@@ -194,6 +210,15 @@ public abstract class PropertyQueryConditionImpl<T> extends QueryConditionImpl<T
             super(property);
             this.op = op;
             this.value = value;
+        }
+
+        public LongArrayCondition(Property<T> property, Operation op, Date[] value) {
+            super(property);
+            this.op = op;
+            this.value = new long[value.length];
+            for (int i = 0; i < value.length; i++) {
+                this.value[i] = value[i].getTime();
+            }
         }
 
         @Override
@@ -440,6 +465,26 @@ public abstract class PropertyQueryConditionImpl<T> extends QueryConditionImpl<T
                 default:
                     throw new UnsupportedOperationException(op + " is not supported for byte[]");
             }
+        }
+    }
+
+    /**
+     * Conditions for properties with an {@link io.objectbox.annotation.HnswIndex}.
+     */
+    public static class NearestNeighborCondition<T> extends PropertyQueryConditionImpl<T> {
+
+        private final float[] queryVector;
+        private final int maxResultCount;
+
+        public NearestNeighborCondition(Property<T> property, float[] queryVector, int maxResultCount) {
+            super(property);
+            this.queryVector = queryVector;
+            this.maxResultCount = maxResultCount;
+        }
+
+        @Override
+        void applyCondition(QueryBuilder<T> builder) {
+            builder.nearestNeighbors(property, queryVector, maxResultCount);
         }
     }
 }

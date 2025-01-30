@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,16 +21,13 @@ import javax.annotation.Nullable;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.sync.SyncClient;
 
+/**
+ * Exposes internal APIs to tests and code in other packages.
+ */
 @Internal
 public class InternalAccess {
-    public static <T> Cursor<T> getReader(Box<T> box) {
-        return box.getReader();
-    }
 
-    public static long getHandle(BoxStore boxStore) {
-        return boxStore.internalHandle();
-    }
-
+    @Internal
     public static Transaction getActiveTx(BoxStore boxStore) {
         Transaction tx = boxStore.activeTx.get();
         if (tx == null) {
@@ -40,45 +37,50 @@ public class InternalAccess {
         return tx;
     }
 
-    public static long getHandle(Cursor reader) {
-        return reader.internalHandle();
-    }
-
+    @Internal
     public static long getHandle(Transaction tx) {
         return tx.internalHandle();
     }
 
+    @Internal
     public static void setSyncClient(BoxStore boxStore, @Nullable SyncClient syncClient) {
         boxStore.setSyncClient(syncClient);
     }
 
-    public static <T> void releaseReader(Box<T> box, Cursor<T> reader) {
-        box.releaseReader(reader);
-    }
-
+    @Internal
     public static <T> Cursor<T> getWriter(Box<T> box) {
         return box.getWriter();
     }
 
+    @Internal
     public static <T> Cursor<T> getActiveTxCursor(Box<T> box) {
         return box.getActiveTxCursor();
     }
 
+    @Internal
     public static <T> long getActiveTxCursorHandle(Box<T> box) {
         return box.getActiveTxCursor().internalHandle();
     }
 
-    public static <T> void releaseWriter(Box<T> box, Cursor<T> writer) {
-        box.releaseWriter(writer);
-    }
-
+    @Internal
     public static <T> void commitWriter(Box<T> box, Cursor<T> writer) {
         box.commitWriter(writer);
     }
 
-    /** Makes creation more expensive, but lets Finalizers show the creation stack for dangling resources. */
+    /**
+     * Makes creation more expensive, but lets Finalizers show the creation stack for dangling resources.
+     * <p>
+     * Currently used by integration tests.
+     */
+    @SuppressWarnings("unused")
+    @Internal
     public static void enableCreationStackTracking() {
         Transaction.TRACK_CREATION_STACK = true;
         Cursor.TRACK_CREATION_STACK = true;
+    }
+
+    @Internal
+    public static BoxStoreBuilder clone(BoxStoreBuilder original, String namePostfix) {
+        return original.createClone(namePostfix);
     }
 }

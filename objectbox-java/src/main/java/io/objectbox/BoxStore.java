@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2021 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2025 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 
 package io.objectbox;
 
-import io.objectbox.internal.Feature;
 import org.greenrobot.essentials.collections.LongHashMap;
 
 import java.io.Closeable;
@@ -45,10 +44,13 @@ import javax.annotation.concurrent.ThreadSafe;
 import io.objectbox.annotation.apihint.Beta;
 import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
+import io.objectbox.config.DebugFlags;
+import io.objectbox.config.FlatStoreOptions;
 import io.objectbox.converter.PropertyConverter;
 import io.objectbox.exception.DbException;
 import io.objectbox.exception.DbExceptionListener;
 import io.objectbox.exception.DbSchemaException;
+import io.objectbox.internal.Feature;
 import io.objectbox.internal.NativeLibraryLoader;
 import io.objectbox.internal.ObjectBoxThreadPool;
 import io.objectbox.reactive.DataObserver;
@@ -68,10 +70,14 @@ public class BoxStore implements Closeable {
     @Nullable private static Object context;
     @Nullable private static Object relinker;
 
-    /** Change so ReLinker will update native library when using workaround loading. */
-    public static final String JNI_VERSION = "3.1.2";
+    /** Prefix supplied with database directory to signal a file-less and in-memory database should be used. */
+    public static final String IN_MEMORY_PREFIX = "memory:";
 
-    private static final String VERSION = "3.1.2-2022-02-15";
+    /** ReLinker uses this as a suffix for the extracted shared library file. If different, it will update it. */
+    public static final String JNI_VERSION = "4.1.0-2025-01-30";
+
+    /** The native or core version of ObjectBox the Java library is known to work with. */
+    private static final String VERSION = "4.1.0-2025-01-30";
     private static BoxStore defaultStore;
 
     /** Currently used DB dirs with values from {@link #getCanonicalPath(File)}. */
@@ -137,12 +143,13 @@ public class BoxStore implements Closeable {
     }
 
     /**
-     * Diagnostics: If this method crashes on a device, please send us the logcat output.
+     * @return true if DB files did not exist or were successfully removed,
+     * false if DB files exist that could not be removed.
      */
-    public static native void testUnalignedMemoryAccess();
+    static native boolean nativeRemoveDbFiles(String directory, boolean removeDir);
 
     /**
-     * Creates a native BoxStore instance with FlatBuffer {@link io.objectbox.model.FlatStoreOptions} {@code options}
+     * Creates a native BoxStore instance with FlatBuffer {@link FlatStoreOptions} {@code options}
      * and a {@link ModelBuilder} {@code model}. Returns the handle of the native store instance.
      */
     static native long nativeCreateWithFlatOptions(byte[] options, byte[] model);
@@ -152,6 +159,15 @@ public class BoxStore implements Closeable {
     static native void nativeDelete(long store);
 
     static native void nativeDropAllData(long store);
+
+    /**
+     * A static counter for the alive entity types (entity schema instances); this can be useful to test against leaks.
+     * This number depends on the number of currently opened stores; no matter how often stores were closed and
+     * (re-)opened. E.g. when stores are regularly opened, but not closed by the user, the number should increase. When
+     * all stores are properly closed, this value should be 0.
+     */
+    @Internal
+    static native long nativeGloballyActiveEntityTypes();
 
     static native long nativeBeginTx(long store);
 
@@ -179,7 +195,9 @@ public class BoxStore implements Closeable {
 
     static native boolean nativeIsObjectBrowserAvailable();
 
-    native long nativeSizeOnDisk(long store);
+    native long nativeDbSize(long store);
+
+    native long nativeDbSizeOnDisk(long store);
 
     native long nativeValidate(long store, long pageLimit, boolean checkLeafLevel);
 
@@ -215,7 +233,8 @@ public class BoxStore implements Closeable {
 
     private final File directory;
     private final String canonicalPath;
-    private final long handle;
+    /** Reference to the native store. Should probably get through {@link #getNativeStore()} instead. */
+    volatile private long handle;
     private final Map<Class<?>, String> dbNameByClass = new HashMap<>();
     private final Map<Class<?>, Integer> entityTypeIdByClass = new HashMap<>();
     private final Map<Class<?>, EntityInfo<?>> propertiesByClass = new HashMap<>();
@@ -232,7 +251,8 @@ public class BoxStore implements Closeable {
     /** Set when running inside TX */
     final ThreadLocal<Transaction> activeTx = new ThreadLocal<>();
 
-    private boolean closed;
+    // volatile so checkOpen() is more up-to-date (no need for synchronized; it's a race anyway)
+    volatile private boolean closed;
 
     final Object txCommitCountLock = new Object();
 
@@ -262,7 +282,7 @@ public class BoxStore implements Closeable {
 
         try {
             handle = nativeCreateWithFlatOptions(builder.buildFlatStoreOptions(canonicalPath), builder.model);
-            if(handle == 0) throw new DbException("Could not create native store");
+            if (handle == 0) throw new DbException("Could not create native store");
 
             int debugFlags = builder.debugFlags;
             if (debugFlags != 0) {
@@ -311,6 +331,12 @@ public class BoxStore implements Closeable {
     }
 
     static String getCanonicalPath(File directory) {
+        // Skip directory check if in-memory prefix is used.
+        if (directory.getPath().startsWith(IN_MEMORY_PREFIX)) {
+            // Just return the path as is (e.g. "memory:data"), safe to use for string-based open check as well.
+            return directory.getPath();
+        }
+
         if (directory.exists()) {
             if (!directory.isDirectory()) {
                 throw new DbException("Is not a directory: " + directory.getAbsolutePath());
@@ -430,6 +456,7 @@ public class BoxStore implements Closeable {
      */
     @Experimental
     public static long sysProcMeminfoKb(String key) {
+        NativeLibraryLoader.ensureLoaded();
         return nativeSysProcMeminfoKb(key);
     }
 
@@ -452,6 +479,7 @@ public class BoxStore implements Closeable {
      */
     @Experimental
     public static long sysProcStatusKb(String key) {
+        NativeLibraryLoader.ensureLoaded();
         return nativeSysProcStatusKb(key);
     }
 
@@ -459,13 +487,36 @@ public class BoxStore implements Closeable {
      * The size in bytes occupied by the data file on disk.
      *
      * @return 0 if the size could not be determined (does not throw unless this store was already closed)
+     * @deprecated Use {@link #getDbSize()} or {@link #getDbSizeOnDisk()} instead which properly handle in-memory databases.
      */
+    @Deprecated
     public long sizeOnDisk() {
-        checkOpen();
-        return nativeSizeOnDisk(handle);
+        return getDbSize();
     }
 
     /**
+     * Get the size of this store. For a disk-based store type, this corresponds to the size on disk, and for the
+     * in-memory store type, this is roughly the used memory bytes occupied by the data.
+     *
+     * @return The size in bytes of the database, or 0 if the file does not exist or some error occurred.
+     */
+    public long getDbSize() {
+        return nativeDbSize(getNativeStore());
+    }
+
+    /**
+     * The size in bytes occupied by the database on disk (if any).
+     *
+     * @return The size in bytes of the database on disk, or 0 if the underlying database is in-memory only
+     * or the size could not be determined.
+     */
+    public long getDbSizeOnDisk() {
+        return nativeDbSizeOnDisk(getNativeStore());
+    }
+
+    /**
+     * Closes this if this is finalized.
+     * <p>
      * Explicitly call {@link #close()} instead to avoid expensive finalization.
      */
     @SuppressWarnings("deprecation") // finalize()
@@ -475,8 +526,11 @@ public class BoxStore implements Closeable {
         super.finalize();
     }
 
+    /**
+     * Verifies this has not been {@link #close() closed}.
+     */
     private void checkOpen() {
-        if (closed) {
+        if (isClosed()) {
             throw new IllegalStateException("Store is closed");
         }
     }
@@ -527,14 +581,13 @@ public class BoxStore implements Closeable {
      */
     @Internal
     public Transaction beginTx() {
-        checkOpen();
         // Because write TXs are typically not cached, initialCommitCount is not as relevant than for read TXs.
         int initialCommitCount = commitCount;
         if (debugTxWrite) {
             System.out.println("Begin TX with commit count " + initialCommitCount);
         }
-        long nativeTx = nativeBeginTx(handle);
-        if(nativeTx == 0) throw new DbException("Could not create native transaction");
+        long nativeTx = nativeBeginTx(getNativeStore());
+        if (nativeTx == 0) throw new DbException("Could not create native transaction");
 
         Transaction tx = new Transaction(this, nativeTx, initialCommitCount);
         synchronized (transactions) {
@@ -549,7 +602,6 @@ public class BoxStore implements Closeable {
      */
     @Internal
     public Transaction beginReadTx() {
-        checkOpen();
         // initialCommitCount should be acquired before starting the tx. In race conditions, there is a chance the
         // commitCount is already outdated. That's OK because it only gives a false positive for an TX being obsolete.
         // In contrast, a false negative would make a TX falsely not considered obsolete, and thus readers would not be
@@ -559,8 +611,8 @@ public class BoxStore implements Closeable {
         if (debugTxRead) {
             System.out.println("Begin read TX with commit count " + initialCommitCount);
         }
-        long nativeTx = nativeBeginReadTx(handle);
-        if(nativeTx == 0) throw new DbException("Could not create native read transaction");
+        long nativeTx = nativeBeginReadTx(getNativeStore());
+        if (nativeTx == 0) throw new DbException("Could not create native read transaction");
 
         Transaction tx = new Transaction(this, nativeTx, initialCommitCount);
         synchronized (transactions) {
@@ -569,6 +621,9 @@ public class BoxStore implements Closeable {
         return tx;
     }
 
+    /**
+     * If this was {@link #close() closed}.
+     */
     public boolean isClosed() {
         return closed;
     }
@@ -578,25 +633,25 @@ public class BoxStore implements Closeable {
      * If true the schema is not updated and write transactions are not possible.
      */
     public boolean isReadOnly() {
-        checkOpen();
-        return nativeIsReadOnly(handle);
+        return nativeIsReadOnly(getNativeStore());
     }
 
     /**
-     * Closes the BoxStore and frees associated resources.
-     * This method is useful for unit tests;
-     * most real applications should open a BoxStore once and keep it open until the app dies.
+     * Closes this BoxStore and releases associated resources.
      * <p>
-     * WARNING:
-     * This is a somewhat delicate thing to do if you have threads running that may potentially still use the BoxStore.
-     * This results in undefined behavior, including the possibility of crashing.
+     * Before calling, <b>all database operations must have finished</b> (there are no more active transactions).
+     * <p>
+     * If that is not the case, the method will briefly wait on any active transactions, but then will forcefully close
+     * them to avoid crashes and print warning messages ("Transactions are still active"). If this occurs,
+     * analyze your code to make sure all database operations, notably in other threads or data observers,
+     * are properly finished.
      */
     public void close() {
         boolean oldClosedState;
         synchronized (this) {
             oldClosedState = closed;
             if (!closed) {
-                if(objectBrowserPort != 0) { // not linked natively (yet), so clean up here
+                if (objectBrowserPort != 0) { // not linked natively (yet), so clean up here
                     try {
                         stopObjectBrowser();
                     } catch (Throwable e) {
@@ -605,17 +660,42 @@ public class BoxStore implements Closeable {
                 }
 
                 // Closeable recommendation: mark as closed before any code that might throw.
+                // Also, before checking on transactions to avoid any new transactions from getting created
+                // (due to all Java APIs doing closed checks).
                 closed = true;
+
                 List<Transaction> transactionsToClose;
                 synchronized (transactions) {
+                    // Give open transactions some time to close (BoxStore.unregisterTransaction() calls notify),
+                    // 1000 ms should be long enough for most small operations and short enough to avoid ANRs on Android.
+                    if (hasActiveTransaction()) {
+                        System.out.println("Briefly waiting for active transactions before closing the Store...");
+                        try {
+                            // It is fine to hold a lock on BoxStore.this as well as BoxStore.unregisterTransaction()
+                            // only synchronizes on "transactions".
+                            //noinspection WaitWhileHoldingTwoLocks
+                            transactions.wait(1000);
+                        } catch (InterruptedException e) {
+                            // If interrupted, continue with releasing native resources
+                        }
+                        if (hasActiveTransaction()) {
+                            System.err.println("Transactions are still active:"
+                                    + " ensure that all database operations are finished before closing the Store!");
+                        }
+                    }
                     transactionsToClose = new ArrayList<>(this.transactions);
                 }
+                // Close all transactions, including recycled (not active) ones stored in Box threadLocalReader.
+                // It is expected that this prints a warning if a transaction is not owned by the current thread.
                 for (Transaction t : transactionsToClose) {
                     t.close();
                 }
-                if (handle != 0) { // failed before native handle was created?
-                    nativeDelete(handle);
-                    // TODO set handle to 0 and check in native methods
+
+                long handleToDelete = handle;
+                // Make isNativeStoreClosed() return true before actually closing to avoid Transaction.close() crash
+                handle = 0;
+                if (handleToDelete != 0) { // failed before native handle was created?
+                    nativeDelete(handleToDelete);
                 }
 
                 // When running the full unit test suite, we had 100+ threads before, hope this helps:
@@ -659,7 +739,7 @@ public class BoxStore implements Closeable {
      * Note: If false is returned, any number of files may have been deleted before the failure happened.
      */
     public boolean deleteAllFiles() {
-        if (!closed) {
+        if (!isClosed()) {
             throw new IllegalStateException("Store must be closed");
         }
         return deleteAllFiles(directory);
@@ -668,38 +748,31 @@ public class BoxStore implements Closeable {
     /**
      * Danger zone! This will delete all files in the given directory!
      * <p>
-     * No {@link BoxStore} may be alive using the given directory.
+     * No {@link BoxStore} may be alive using the given directory. E.g. call this before building a store. When calling
+     * this after {@link #close() closing} a store, read the docs of that method carefully first!
      * <p>
-     * If you did not use a custom name with BoxStoreBuilder, you can pass "new File({@link
-     * BoxStoreBuilder#DEFAULT_NAME})".
+     * If no {@link BoxStoreBuilder#name(String) name} was specified when building the store, use like:
+     *
+     * <pre>{@code
+     *     BoxStore.deleteAllFiles(new File(BoxStoreBuilder.DEFAULT_NAME));
+     * }</pre>
+     *
+     * <p>For an {@link BoxStoreBuilder#inMemory(String) in-memory} database, this will just clean up the in-memory
+     * database.
      *
      * @param objectStoreDirectory directory to be deleted; this is the value you previously provided to {@link
-     *                             BoxStoreBuilder#directory(File)}
+     * BoxStoreBuilder#directory(File)}
      * @return true if the directory 1) was deleted successfully OR 2) did not exist in the first place.
      * Note: If false is returned, any number of files may have been deleted before the failure happened.
-     * @throws IllegalStateException if the given directory is still used by a open {@link BoxStore}.
+     * @throws IllegalStateException if the given directory is still used by an open {@link BoxStore}.
      */
     public static boolean deleteAllFiles(File objectStoreDirectory) {
-        if (!objectStoreDirectory.exists()) {
-            return true;
-        }
-        if (isFileOpen(getCanonicalPath(objectStoreDirectory))) {
+        String canonicalPath = getCanonicalPath(objectStoreDirectory);
+        if (isFileOpen(canonicalPath)) {
             throw new IllegalStateException("Cannot delete files: store is still open");
         }
-
-        File[] files = objectStoreDirectory.listFiles();
-        if (files == null) {
-            return false;
-        }
-        for (File file : files) {
-            if (!file.delete()) {
-                // OK if concurrently deleted. Fail fast otherwise.
-                if (file.exists()) {
-                    return false;
-                }
-            }
-        }
-        return objectStoreDirectory.delete();
+        NativeLibraryLoader.ensureLoaded();
+        return nativeRemoveDbFiles(canonicalPath, true);
     }
 
     /**
@@ -710,9 +783,9 @@ public class BoxStore implements Closeable {
      * If you did not use a custom name with BoxStoreBuilder, you can pass "new File({@link
      * BoxStoreBuilder#DEFAULT_NAME})".
      *
-     * @param androidContext     provide an Android Context like Application or Service
+     * @param androidContext provide an Android Context like Application or Service
      * @param customDbNameOrNull use null for default name, or the name you previously provided to {@link
-     *                           BoxStoreBuilder#name(String)}.
+     * BoxStoreBuilder#name(String)}.
      * @return true if the directory 1) was deleted successfully OR 2) did not exist in the first place.
      * Note: If false is returned, any number of files may have been deleted before the failure happened.
      * @throws IllegalStateException if the given name is still used by a open {@link BoxStore}.
@@ -731,9 +804,9 @@ public class BoxStore implements Closeable {
      * BoxStoreBuilder#DEFAULT_NAME})".
      *
      * @param baseDirectoryOrNull use null for no base dir, or the value you previously provided to {@link
-     *                            BoxStoreBuilder#baseDirectory(File)}
-     * @param customDbNameOrNull  use null for default name, or the name you previously provided to {@link
-     *                            BoxStoreBuilder#name(String)}.
+     * BoxStoreBuilder#baseDirectory(File)}
+     * @param customDbNameOrNull use null for default name, or the name you previously provided to {@link
+     * BoxStoreBuilder#name(String)}.
      * @return true if the directory 1) was deleted successfully OR 2) did not exist in the first place.
      * Note: If false is returned, any number of files may have been deleted before the failure happened.
      * @throws IllegalStateException if the given directory (+name) is still used by a open {@link BoxStore}.
@@ -759,15 +832,32 @@ public class BoxStore implements Closeable {
      * </ul>
      */
     public void removeAllObjects() {
-        checkOpen();
-        nativeDropAllData(handle);
+        nativeDropAllData(getNativeStore());
     }
 
     @Internal
     public void unregisterTransaction(Transaction transaction) {
         synchronized (transactions) {
             transactions.remove(transaction);
+            // For close(): notify if there are no more open transactions
+            if (!hasActiveTransaction()) {
+                transactions.notifyAll();
+            }
         }
+    }
+
+    /**
+     * Returns if {@link #transactions} has a single transaction that {@link Transaction#isActive() isActive()}.
+     * <p>
+     * Callers must synchronize on {@link #transactions}.
+     */
+    private boolean hasActiveTransaction() {
+        for (Transaction tx : transactions) {
+            if (tx.isActive()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     void txCommitted(Transaction tx, @Nullable int[] entityTypeIdsAffected) {
@@ -1043,15 +1133,15 @@ public class BoxStore implements Closeable {
      * @return String that is typically logged by the application.
      */
     public String diagnose() {
-        checkOpen();
-        return nativeDiagnose(handle);
+        return nativeDiagnose(getNativeStore());
     }
 
     /**
      * Validate database pages, a lower level storage unit (integrity check).
      * Do not call this inside a transaction (currently unsupported).
+     *
      * @param pageLimit the maximum of pages to validate (e.g. to limit time spent on validation).
-     *        Pass zero set no limit and thus validate all pages.
+     * Pass zero set no limit and thus validate all pages.
      * @param checkLeafLevel Flag to validate leaf pages. These do not point to other pages but contain data.
      * @return Number of pages validated, which may be twice the given pageLimit as internally there are "two DBs".
      * @throws DbException if validation failed to run (does not tell anything about DB file consistency).
@@ -1062,12 +1152,11 @@ public class BoxStore implements Closeable {
         if (pageLimit < 0) {
             throw new IllegalArgumentException("pageLimit must be zero or positive");
         }
-        checkOpen();
-        return nativeValidate(handle, pageLimit, checkLeafLevel);
+        return nativeValidate(getNativeStore(), pageLimit, checkLeafLevel);
     }
 
     public int cleanStaleReadTransactions() {
-        return nativeCleanStaleReadTransactions(handle);
+        return nativeCleanStaleReadTransactions(getNativeStore());
     }
 
     /**
@@ -1080,11 +1169,6 @@ public class BoxStore implements Closeable {
             box.closeThreadResources();
         }
         // activeTx is cleaned up in finally blocks, so do not free them here
-    }
-
-    @Internal
-    long internalHandle() {
-        return handle;
     }
 
     /**
@@ -1100,7 +1184,18 @@ public class BoxStore implements Closeable {
      * Note that failed or aborted transaction do not trigger observers.
      */
     public SubscriptionBuilder<Class> subscribe() {
+        checkOpen();
         return new SubscriptionBuilder<>(objectClassPublisher, null);
+    }
+
+    /**
+     * Like {@link #subscribe()}, but wires the supplied @{@link io.objectbox.reactive.DataObserver} only to the given
+     * object class for notifications.
+     */
+    @SuppressWarnings("unchecked")
+    public <T> SubscriptionBuilder<Class<T>> subscribe(Class<T> forClass) {
+        checkOpen();
+        return new SubscriptionBuilder<>((DataPublisher) objectClassPublisher, forClass);
     }
 
     @Experimental
@@ -1127,8 +1222,7 @@ public class BoxStore implements Closeable {
     @Nullable
     public String startObjectBrowser(int port) {
         verifyObjectBrowserNotRunning();
-        checkOpen();
-        String url = nativeStartObjectBrowser(handle, null, port);
+        String url = nativeStartObjectBrowser(getNativeStore(), null, port);
         if (url != null) {
             objectBrowserPort = port;
         }
@@ -1139,14 +1233,13 @@ public class BoxStore implements Closeable {
     @Nullable
     public String startObjectBrowser(String urlToBindTo) {
         verifyObjectBrowserNotRunning();
-        checkOpen();
         int port;
         try {
             port = new URL(urlToBindTo).getPort(); // Gives -1 if not available
         } catch (MalformedURLException e) {
             throw new RuntimeException("Can not start Object Browser at " + urlToBindTo, e);
         }
-        String url = nativeStartObjectBrowser(handle, urlToBindTo, 0);
+        String url = nativeStartObjectBrowser(getNativeStore(), urlToBindTo, 0);
         if (url != null) {
             objectBrowserPort = port;
         }
@@ -1155,12 +1248,11 @@ public class BoxStore implements Closeable {
 
     @Experimental
     public synchronized boolean stopObjectBrowser() {
-        if(objectBrowserPort == 0) {
+        if (objectBrowserPort == 0) {
             throw new IllegalStateException("ObjectBrowser has not been started before");
         }
         objectBrowserPort = 0;
-        checkOpen();
-        return nativeStopObjectBrowser(handle);
+        return nativeStopObjectBrowser(getNativeStore());
     }
 
     @Experimental
@@ -1185,17 +1277,7 @@ public class BoxStore implements Closeable {
      * This for example allows central error handling or special logging for database-related exceptions.
      */
     public void setDbExceptionListener(@Nullable DbExceptionListener dbExceptionListener) {
-        checkOpen();
-        nativeSetDbExceptionListener(handle, dbExceptionListener);
-    }
-
-    /**
-     * Like {@link #subscribe()}, but wires the supplied @{@link io.objectbox.reactive.DataObserver} only to the given
-     * object class for notifications.
-     */
-    @SuppressWarnings("unchecked")
-    public <T> SubscriptionBuilder<Class<T>> subscribe(Class<T> forClass) {
-        return new SubscriptionBuilder<>((DataPublisher) objectClassPublisher, forClass);
+        nativeSetDbExceptionListener(getNativeStore(), dbExceptionListener);
     }
 
     @Internal
@@ -1224,18 +1306,19 @@ public class BoxStore implements Closeable {
     }
 
     void setDebugFlags(int debugFlags) {
-        checkOpen();
-        nativeSetDebugFlags(handle, debugFlags);
+        nativeSetDebugFlags(getNativeStore(), debugFlags);
     }
 
     long panicModeRemoveAllObjects(int entityId) {
-        checkOpen();
-        return nativePanicModeRemoveAllObjects(handle, entityId);
+        return nativePanicModeRemoveAllObjects(getNativeStore(), entityId);
     }
 
     /**
-     * If you want to use the same ObjectBox store using the C API, e.g. via JNI, this gives the required pointer,
-     * which you have to pass on to obx_store_wrap().
+     * Gets the reference to the native store. Can be used with the C API to use the same store, e.g. via JNI, by
+     * passing it on to {@code obx_store_wrap()}.
+     * <p>
+     * Throws if the store is closed.
+     * <p>
      * The procedure is like this:<br>
      * 1) you create a BoxStore on the Java side<br>
      * 2) you call this method to get the native store pointer<br>
@@ -1246,10 +1329,20 @@ public class BoxStore implements Closeable {
      * Note: Once you {@link #close()} this BoxStore, do not use it from the C API.
      */
     public long getNativeStore() {
-        if (closed) {
-            throw new IllegalStateException("Store must still be open");
-        }
+        checkOpen();
         return handle;
+    }
+
+    /**
+     * For internal use only. This API might change or be removed with a future release.
+     * <p>
+     * Returns if the native Store was closed.
+     * <p>
+     * This is {@code true} shortly after {@link #close()} was called and {@link #isClosed()} returns {@code true}.
+     */
+    @Internal
+    public boolean isNativeStoreClosed() {
+        return handle == 0;
     }
 
     /**

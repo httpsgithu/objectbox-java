@@ -1,46 +1,55 @@
+/*
+ * Copyright 2019-2024 ObjectBox Ltd. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.objectbox.sync.server;
 
-import io.objectbox.InternalAccess;
-import io.objectbox.annotation.apihint.Internal;
-import io.objectbox.sync.listener.SyncChangeListener;
-import io.objectbox.sync.SyncCredentials;
-import io.objectbox.sync.SyncCredentialsToken;
+import java.net.URI;
+import java.net.URISyntaxException;
 
 import javax.annotation.Nullable;
+
+import io.objectbox.annotation.apihint.Internal;
+import io.objectbox.sync.listener.SyncChangeListener;
 
 /**
  * Internal sync server implementation. Use {@link SyncServer} to access functionality,
  * this class may change without notice.
  */
 @Internal
-public class SyncServerImpl implements SyncServer {
+public final class SyncServerImpl implements SyncServer {
 
-    private final String url;
+    private final URI url;
     private volatile long handle;
 
+    /**
+     * Protects listener instance from garbage collection.
+     */
+    @SuppressWarnings("unused")
     @Nullable
     private volatile SyncChangeListener syncChangeListener;
 
     SyncServerImpl(SyncServerBuilder builder) {
         this.url = builder.url;
 
-        long storeHandle = InternalAccess.getHandle(builder.boxStore);
-        long handle = nativeCreate(storeHandle, url, builder.certificatePath);
+        long storeHandle = builder.boxStore.getNativeStore();
+        long handle = nativeCreateFromFlatOptions(storeHandle, builder.buildSyncServerOptions());
         if (handle == 0) {
             throw new RuntimeException("Failed to create sync server: handle is zero.");
         }
         this.handle = handle;
-
-        for (SyncCredentials credentials : builder.credentials) {
-            SyncCredentialsToken credentialsInternal = (SyncCredentialsToken) credentials;
-            nativeSetAuthenticator(handle, credentialsInternal.getTypeId(), credentialsInternal.getTokenBytes());
-            credentialsInternal.clear(); // Clear immediately, not needed anymore.
-        }
-
-        for (PeerInfo peer : builder.peers) {
-            SyncCredentialsToken credentialsInternal = (SyncCredentialsToken) peer.credentials;
-            nativeAddPeer(handle, peer.url, credentialsInternal.getTypeId(), credentialsInternal.getTokenBytes());
-        }
 
         if (builder.changeListener != null) {
             setSyncChangeListener(builder.changeListener);
@@ -57,7 +66,11 @@ public class SyncServerImpl implements SyncServer {
 
     @Override
     public String getUrl() {
-        return url;
+        try {
+            return new URI(url.getScheme(), null, url.getHost(), getPort(), null, null, null).toString();
+        } catch (URISyntaxException e) {
+            throw new RuntimeException("Server URL can not be constructed", e);
+        }
     }
 
     @Override
@@ -67,7 +80,8 @@ public class SyncServerImpl implements SyncServer {
 
     @Override
     public boolean isRunning() {
-        return nativeIsRunning(getHandle());
+        long handle = this.handle;  // Do not call getHandle() as it throws if handle is 0
+        return handle != 0 && nativeIsRunning(handle);
     }
 
     @Override
@@ -110,7 +124,12 @@ public class SyncServerImpl implements SyncServer {
         super.finalize();
     }
 
-    private static native long nativeCreate(long storeHandle, String uri, @Nullable String certificatePath);
+    /**
+     * Creates a native Sync server instance with FlatBuffer {@link SyncServerOptions} {@code flatOptionsByteArray}.
+     *
+     * @return The handle of the native server instance.
+     */
+    private static native long nativeCreateFromFlatOptions(long storeHandle, byte[] flatOptionsByteArray);
 
     private native void nativeDelete(long handle);
 
@@ -121,10 +140,6 @@ public class SyncServerImpl implements SyncServer {
     private native boolean nativeIsRunning(long handle);
 
     private native int nativeGetPort(long handle);
-
-    private native void nativeSetAuthenticator(long handle, long credentialsType, @Nullable byte[] credentials);
-
-    private native void nativeAddPeer(long handle, String uri, long credentialsType, @Nullable byte[] credentials);
 
     private native String nativeGetStatsString(long handle);
 

@@ -1,4 +1,25 @@
+/*
+ * Copyright 2019-2024 ObjectBox Ltd. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.objectbox.sync;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import javax.annotation.Nullable;
 
 import io.objectbox.BoxStore;
 import io.objectbox.InternalAccess;
@@ -12,16 +33,12 @@ import io.objectbox.sync.listener.SyncListener;
 import io.objectbox.sync.listener.SyncLoginListener;
 import io.objectbox.sync.listener.SyncTimeListener;
 
-import javax.annotation.Nullable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-
 /**
  * Internal sync client implementation. Use {@link SyncClient} to access functionality,
  * this class may change without notice.
  */
 @Internal
-public class SyncClientImpl implements SyncClient {
+public final class SyncClientImpl implements SyncClient {
 
     @Nullable
     private BoxStore boxStore;
@@ -47,7 +64,7 @@ public class SyncClientImpl implements SyncClient {
         this.serverUrl = builder.url;
         this.connectivityMonitor = builder.platform.getConnectivityMonitor();
 
-        long boxStoreHandle = InternalAccess.getHandle(builder.boxStore);
+        long boxStoreHandle = builder.boxStore.getNativeStore();
         long handle = nativeCreate(boxStoreHandle, serverUrl, builder.trustedCertPaths);
         if (handle == 0) {
             throw new RuntimeException("Failed to create sync client: handle is zero.");
@@ -79,7 +96,13 @@ public class SyncClientImpl implements SyncClient {
         this.internalListener = new InternalSyncClientListener();
         nativeSetListener(handle, internalListener);
 
-        setLoginCredentials(builder.credentials);
+        if (builder.credentials.size() == 1) {
+            setLoginCredentials(builder.credentials.get(0));
+        } else if (builder.credentials.size() > 1) {
+            setLoginCredentials(builder.credentials.toArray(new SyncCredentials[0]));
+        } else {
+            throw new IllegalArgumentException("No credentials provided");
+        }
 
         // If created successfully, let store keep a reference so the caller does not have to.
         InternalAccess.setSyncClient(builder.boxStore, this);
@@ -166,10 +189,38 @@ public class SyncClientImpl implements SyncClient {
 
     @Override
     public void setLoginCredentials(SyncCredentials credentials) {
-        SyncCredentialsToken credentialsInternal = (SyncCredentialsToken) credentials;
-        nativeSetLoginInfo(getHandle(), credentialsInternal.getTypeId(), credentialsInternal.getTokenBytes());
-        credentialsInternal.clear(); // Clear immediately, not needed anymore.
+        if (credentials instanceof SyncCredentialsToken) {
+            SyncCredentialsToken credToken = (SyncCredentialsToken) credentials;
+            nativeSetLoginInfo(getHandle(), credToken.getTypeId(), credToken.getTokenBytes());
+            credToken.clear(); // Clear immediately, not needed anymore.
+        } else if (credentials instanceof SyncCredentialsUserPassword) {
+            SyncCredentialsUserPassword credUserPassword = (SyncCredentialsUserPassword) credentials;
+            nativeSetLoginInfoUserPassword(getHandle(), credUserPassword.getTypeId(), credUserPassword.getUsername(),
+                    credUserPassword.getPassword());
+        } else {
+            throw new IllegalArgumentException("credentials is not a supported type");
+        }
     }
+
+    @Override
+    public void setLoginCredentials(SyncCredentials[] multipleCredentials) {
+        for (int i = 0; i < multipleCredentials.length; i++) {
+            SyncCredentials credentials = multipleCredentials[i];
+            boolean isLast = i == (multipleCredentials.length - 1);
+            if (credentials instanceof SyncCredentialsToken) {
+                SyncCredentialsToken credToken = (SyncCredentialsToken) credentials;
+                nativeAddLoginCredentials(getHandle(), credToken.getTypeId(), credToken.getTokenBytes(), isLast);
+                credToken.clear(); // Clear immediately, not needed anymore.
+            } else if (credentials instanceof SyncCredentialsUserPassword) {
+                SyncCredentialsUserPassword credUserPassword = (SyncCredentialsUserPassword) credentials;
+                nativeAddLoginCredentialsUserPassword(getHandle(), credUserPassword.getTypeId(), credUserPassword.getUsername(),
+                        credUserPassword.getPassword(), isLast);
+            } else {
+                throw new IllegalArgumentException("credentials is not a supported type");
+            }
+        }
+    }
+
 
     @Override
     public boolean awaitFirstLogin(long millisToWait) {
@@ -295,6 +346,12 @@ public class SyncClientImpl implements SyncClient {
 
     private native void nativeSetLoginInfo(long handle, long credentialsType, @Nullable byte[] credentials);
 
+    private native void nativeSetLoginInfoUserPassword(long handle, long credentialsType, String username, String password);
+
+    private native void nativeAddLoginCredentials(long handle, long credentialsType, @Nullable byte[] credentials, boolean complete);
+
+    private native void nativeAddLoginCredentialsUserPassword(long handle, long credentialsType, String username, String password, boolean complete);
+
     private native void nativeSetListener(long handle, @Nullable InternalSyncClientListener listener);
 
     private native void nativeSetSyncChangesListener(long handle, @Nullable SyncChangeListener advancedListener);
@@ -322,8 +379,8 @@ public class SyncClientImpl implements SyncClient {
     private native boolean nativeCancelUpdates(long handle);
 
     /**
-     *  Hints to the native client that an active network connection is available.
-     *  Returns true if the native client was disconnected (and will try to re-connect).
+     * Hints to the native client that an active network connection is available.
+     * Returns true if the native client was disconnected (and will try to re-connect).
      */
     private native boolean nativeTriggerReconnect(long handle);
 

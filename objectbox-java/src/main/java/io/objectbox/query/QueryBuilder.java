@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,20 +16,19 @@
 
 package io.objectbox.query;
 
-import io.objectbox.Box;
-import io.objectbox.EntityInfo;
-import io.objectbox.Property;
-import io.objectbox.annotation.apihint.Experimental;
-import io.objectbox.annotation.apihint.Internal;
-import io.objectbox.exception.DbException;
-import io.objectbox.relation.RelationInfo;
-
-import javax.annotation.Nullable;
-import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
+
+import javax.annotation.Nullable;
+
+import io.objectbox.Box;
+import io.objectbox.EntityInfo;
+import io.objectbox.Property;
+import io.objectbox.annotation.apihint.Internal;
+import io.objectbox.exception.DbException;
+import io.objectbox.relation.RelationInfo;
 
 /**
  * Builds a {@link Query Query} using conditions which can then be used to return a list of matching Objects.
@@ -58,7 +57,7 @@ import java.util.List;
  * @param <T> Entity class for which the Query is built.
  */
 @SuppressWarnings({"WeakerAccess", "UnusedReturnValue", "unused"})
-public class QueryBuilder<T> implements Closeable {
+public class QueryBuilder<T> {
 
     public enum StringOrder {
         /**
@@ -152,6 +151,9 @@ public class QueryBuilder<T> implements Closeable {
 
     private native void nativeSetParameterAlias(long conditionHandle, String alias);
 
+    private native long nativeRelationCount(long handle, long storeHandle, int relationOwnerEntityId, int propertyId,
+                                            int relationCount);
+
     // ------------------------------ (Not)Null------------------------------
 
     private native long nativeNull(long handle, int propertyId);
@@ -204,6 +206,8 @@ public class QueryBuilder<T> implements Closeable {
 
     private native long nativeBetween(long handle, int propertyId, double value1, double value2);
 
+    private native long nativeNearestNeighborsF32(long handle, int propertyId, float[] queryVector, int maxResultCount);
+
     // ------------------------------ Bytes ------------------------------
 
     private native long nativeEqual(long handle, int propertyId, byte[] value);
@@ -217,7 +221,7 @@ public class QueryBuilder<T> implements Closeable {
         this.box = box;
         this.storeHandle = storeHandle;
         handle = nativeCreate(storeHandle, entityName);
-        if(handle == 0) throw new DbException("Could not create native query builder");
+        if (handle == 0) throw new DbException("Could not create native query builder");
         isSubQuery = false;
     }
 
@@ -229,7 +233,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
-     * Explicitly call {@link #close()} instead to avoid expensive finalization.
+     * Typically {@link #build()} is called on this which calls {@link #close()} and avoids expensive finalization here.
+     * <p>
+     * If {@link #build()} is not called, make sure to explicitly call {@link #close()}.
      */
     @SuppressWarnings("deprecation") // finalize()
     @Override
@@ -238,6 +244,12 @@ public class QueryBuilder<T> implements Closeable {
         super.finalize();
     }
 
+    /**
+     * Close this query builder and free used resources.
+     * <p>
+     * This is not required when calling {@link #build()}.
+     */
+    // Not implementing (Auto)Closeable as QueryBuilder is typically closed due to build() getting called.
     public synchronized void close() {
         if (handle != 0) {
             // Closeable recommendation: mark as "closed" before nativeDestroy could throw.
@@ -259,7 +271,7 @@ public class QueryBuilder<T> implements Closeable {
             throw new IllegalStateException("Incomplete logic condition. Use or()/and() between two conditions only.");
         }
         long queryHandle = nativeBuild(handle);
-        if(queryHandle == 0) throw new DbException("Could not create native query");
+        if (queryHandle == 0) throw new DbException("Could not create native query");
         Query<T> query = new Query<>(box, queryHandle, eagerRelations, filter, comparator);
         close();
         return query;
@@ -278,8 +290,6 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
-     * Experimental. This API might change or be removed in the future based on user feedback.
-     * <p>
      * Applies the given query conditions and returns the builder for further customization, such as result order.
      * Build the condition using the properties from your entity underscore classes.
      * <p>
@@ -297,7 +307,6 @@ public class QueryBuilder<T> implements Closeable {
      * </pre>
      * Use {@link Box#query(QueryCondition)} as a shortcut for this method.
      */
-    @Experimental
     public QueryBuilder<T> apply(QueryCondition<T> queryCondition) {
         ((QueryConditionImpl<T>) queryCondition).apply(this);
         return this;
@@ -347,10 +356,7 @@ public class QueryBuilder<T> implements Closeable {
     public QueryBuilder<T> order(Property<T> property, int flags) {
         verifyNotSubQuery();
         verifyHandle();
-        if (combineNextWith != Operator.NONE) {
-            throw new IllegalStateException(
-                    "An operator is pending. Use operators like and() and or() only between two conditions.");
-        }
+        checkNoOperatorPending();
         nativeOrder(handle, property.getId(), flags);
         return this;
     }
@@ -362,6 +368,9 @@ public class QueryBuilder<T> implements Closeable {
 
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * Assigns the given alias to the previous condition.
      *
      * @param alias The string alias for use with setParameter(s) methods.
@@ -421,8 +430,7 @@ public class QueryBuilder<T> implements Closeable {
 
     /**
      * Specifies relations that should be resolved eagerly.
-     * This prepares the given relation objects to be preloaded (cached) avoiding further get operations from the db.
-     * A common use case is prealoading all
+     * This prepares the given relation objects to be preloaded (cached) avoiding further get operations from the database.
      *
      * @param relationInfo The relation as found in the generated meta info class ("EntityName_") of class T.
      * @param more         Supply further relations to be eagerly loaded.
@@ -524,13 +532,19 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     private void combineOperator(Operator operator) {
+        verifyHandle(); // Not using handle, but throw for consistency with other methods.
         if (lastCondition == 0) {
             throw new IllegalStateException("No previous condition. Use operators like and() and or() only between two conditions.");
         }
-        if (combineNextWith != Operator.NONE) {
-            throw new IllegalStateException("Another operator is pending. Use operators like and() and or() only between two conditions.");
-        }
+        checkNoOperatorPending();
         combineNextWith = operator;
+    }
+
+    private void checkNoOperatorPending() {
+        if (combineNextWith != Operator.NONE) {
+            throw new IllegalStateException(
+                    "Another operator is pending. Use operators like and() and or() only between two conditions.");
+        }
     }
 
     private void checkCombineCondition(long currentCondition) {
@@ -559,15 +573,34 @@ public class QueryBuilder<T> implements Closeable {
         lastCondition = nativeCombine(handle, leftCondition, rightCondition, true);
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> isNull(Property<T> property) {
         verifyHandle();
         checkCombineCondition(nativeNull(handle, property.getId()));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> notNull(Property<T> property) {
         verifyHandle();
         checkCombineCondition(nativeNotNull(handle, property.getId()));
+        return this;
+    }
+
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
+    public QueryBuilder<T> relationCount(RelationInfo<T, ?> relationInfo, int relationCount) {
+        verifyHandle();
+        checkCombineCondition(nativeRelationCount(handle, storeHandle, relationInfo.targetInfo.getEntityId(),
+                relationInfo.targetIdProperty.id, relationCount));
         return this;
     }
 
@@ -575,36 +608,60 @@ public class QueryBuilder<T> implements Closeable {
     //                                              Integers
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> equal(Property<T> property, long value) {
         verifyHandle();
         checkCombineCondition(nativeEqual(handle, property.getId(), value));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> notEqual(Property<T> property, long value) {
         verifyHandle();
         checkCombineCondition(nativeNotEqual(handle, property.getId(), value));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> less(Property<T> property, long value) {
         verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> lessOrEqual(Property<T> property, long value) {
         verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value, true));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> greater(Property<T> property, long value) {
         verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> greaterOrEqual(Property<T> property, long value) {
         verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value, true));
@@ -612,6 +669,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * Finds objects with property value between and including the first and second value.
      */
     public QueryBuilder<T> between(Property<T> property, long value1, long value2) {
@@ -621,12 +681,20 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     // FIXME DbException: invalid unordered_map<K, T> key
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> in(Property<T> property, long[] values) {
         verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> notIn(Property<T> property, long[] values) {
         verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, true));
@@ -637,12 +705,20 @@ public class QueryBuilder<T> implements Closeable {
     // Integers -> int[]
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> in(Property<T> property, int[] values) {
         verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> notIn(Property<T> property, int[] values) {
         verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, true));
@@ -653,12 +729,20 @@ public class QueryBuilder<T> implements Closeable {
     // Integers -> boolean
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> equal(Property<T> property, boolean value) {
         verifyHandle();
         checkCombineCondition(nativeEqual(handle, property.getId(), value ? 1 : 0));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> notEqual(Property<T> property, boolean value) {
         verifyHandle();
         checkCombineCondition(nativeNotEqual(handle, property.getId(), value ? 1 : 0));
@@ -670,6 +754,9 @@ public class QueryBuilder<T> implements Closeable {
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     *
      * @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead.
      */
     public QueryBuilder<T> equal(Property<T> property, Date value) {
@@ -679,6 +766,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     *
      * @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead.
      */
     public QueryBuilder<T> notEqual(Property<T> property, Date value) {
@@ -688,6 +778,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     *
      * @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead.
      */
     public QueryBuilder<T> less(Property<T> property, Date value) {
@@ -697,6 +790,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     *
      * @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead.
      */
     public QueryBuilder<T> lessOrEqual(Property<T> property, Date value) {
@@ -706,6 +802,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     *
      * @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead.
      */
     public QueryBuilder<T> greater(Property<T> property, Date value) {
@@ -715,6 +814,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     *
      * @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead.
      */
     public QueryBuilder<T> greaterOrEqual(Property<T> property, Date value) {
@@ -724,6 +826,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * Finds objects with property value between and including the first and second value.
      *
      * @throws NullPointerException if one of the given values is null.
@@ -739,6 +844,9 @@ public class QueryBuilder<T> implements Closeable {
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * Creates an "equal ('=')" condition for this property.
      */
     public QueryBuilder<T> equal(Property<T> property, String value, StringOrder order) {
@@ -748,6 +856,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * Creates a "not equal ('&lt;&gt;')" condition for this property.
      */
     public QueryBuilder<T> notEqual(Property<T> property, String value, StringOrder order) {
@@ -757,7 +868,10 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
-     * Creates an contains condition.
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
+     * Creates a contains condition.
      * <p>
      * Note: for a String array property, use {@link #containsElement} instead.
      */
@@ -771,6 +885,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * For a String array, list or String-key map property, matches if at least one element equals the given value.
      */
     public QueryBuilder<T> containsElement(Property<T> property, String value, StringOrder order) {
@@ -780,6 +897,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * For a String-key map property, matches if at least one key and value combination equals the given values.
      */
     public QueryBuilder<T> containsKeyValue(Property<T> property, String key, String value, StringOrder order) {
@@ -788,42 +908,70 @@ public class QueryBuilder<T> implements Closeable {
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> startsWith(Property<T> property, String value, StringOrder order) {
         verifyHandle();
         checkCombineCondition(nativeStartsWith(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> endsWith(Property<T> property, String value, StringOrder order) {
         verifyHandle();
         checkCombineCondition(nativeEndsWith(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> less(Property<T> property, String value, StringOrder order) {
         verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> lessOrEqual(Property<T> property, String value, StringOrder order) {
         verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE, true));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> greater(Property<T> property, String value, StringOrder order) {
         verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> greaterOrEqual(Property<T> property, String value, StringOrder order) {
         verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE, true));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> in(Property<T> property, String[] values, StringOrder order) {
         verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, order == StringOrder.CASE_SENSITIVE));
@@ -838,6 +986,9 @@ public class QueryBuilder<T> implements Closeable {
     // Help people with floating point equality...
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * Floating point equality is non-trivial; this is just a convenience for
      * {@link #between(Property, double, double)} with parameters(property, value - tolerance, value + tolerance).
      * When using {@link Query#setParameters(Property, double, double)},
@@ -847,24 +998,40 @@ public class QueryBuilder<T> implements Closeable {
         return between(property, value - tolerance, value + tolerance);
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> less(Property<T> property, double value) {
         verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> lessOrEqual(Property<T> property, double value) {
         verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value, true));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> greater(Property<T> property, double value) {
         verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> greaterOrEqual(Property<T> property, double value) {
         verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value, true));
@@ -872,6 +1039,9 @@ public class QueryBuilder<T> implements Closeable {
     }
 
     /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     * <p>
      * Finds objects with property value between and including the first and second value.
      */
     public QueryBuilder<T> between(Property<T> property, double value1, double value2) {
@@ -880,34 +1050,64 @@ public class QueryBuilder<T> implements Closeable {
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
+    public QueryBuilder<T> nearestNeighbors(Property<T> property, float[] queryVector, int maxResultCount) {
+        verifyHandle();
+        checkCombineCondition(nativeNearestNeighborsF32(handle, property.getId(), queryVector, maxResultCount));
+        return this;
+    }
+
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     //                                                 Bytes
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> equal(Property<T> property, byte[] value) {
         verifyHandle();
         checkCombineCondition(nativeEqual(handle, property.getId(), value));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> less(Property<T> property, byte[] value) {
         verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> lessOrEqual(Property<T> property, byte[] value) {
         verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value, true));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> greater(Property<T> property, byte[] value) {
         verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value, false));
         return this;
     }
 
+    /**
+     * <b>Note:</b> New code should use the {@link Box#query(QueryCondition) new query API}. Existing code can continue
+     * to use this, there are currently no plans to remove the old query API.
+     */
     public QueryBuilder<T> greaterOrEqual(Property<T> property, byte[] value) {
         verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value, true));

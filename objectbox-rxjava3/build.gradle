@@ -2,13 +2,16 @@ buildscript {
     ext.javadocDir = file("$buildDir/docs/javadoc")
 }
 
-apply plugin: 'java-library'
-apply plugin: 'kotlin'
-apply plugin: 'org.jetbrains.dokka'
+plugins {
+    id("java-library")
+    id("kotlin")
+    id("org.jetbrains.dokka")
+    id("objectbox-publish")
+}
 
 // Note: use release flag instead of sourceCompatibility and targetCompatibility to ensure only JDK 8 API is used.
 // https://docs.gradle.org/current/userguide/building_java_projects.html#sec:java_cross_compilation
-tasks.withType(JavaCompile) {
+tasks.withType(JavaCompile).configureEach {
     options.release.set(8)
 }
 
@@ -30,7 +33,7 @@ tasks.named("dokkaHtml") {
                 // Point to web javadoc for objectbox-java packages.
                 url.set(new URL("https://objectbox.io/docfiles/java/current/"))
                 // Note: Using JDK 9+ package-list is now called element-list.
-                packageListUrl.set(new URL(url, "element-list"))
+                packageListUrl.set(new URL("https://objectbox.io/docfiles/java/current/element-list"))
             }
         }
     }
@@ -39,21 +42,21 @@ tasks.named("dokkaHtml") {
 dependencies {
     api project(':objectbox-java')
     api 'io.reactivex.rxjava3:rxjava:3.0.11'
-    compileOnly "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
 
-    testImplementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
-    testImplementation "junit:junit:$junit_version"
-    testImplementation "org.mockito:mockito-core:$mockito_version"
+    testImplementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
+    testImplementation "junit:junit:$junitVersion"
+    testImplementation "org.mockito:mockito-core:$mockitoVersion"
 }
 
-task javadocJar(type: Jar) {
+tasks.register('javadocJar', Jar) {
     dependsOn tasks.named("dokkaHtml")
     group = 'build'
     archiveClassifier.set('javadoc')
     from "$javadocDir"
 }
 
-task sourcesJar(type: Jar) {
+tasks.register('sourcesJar', Jar) {
     group = 'build'
     archiveClassifier.set('sources')
     from sourceSets.main.allSource

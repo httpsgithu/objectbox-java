@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 ObjectBox Ltd. All rights reserved.
+ * Copyright 2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,9 +43,5 @@ public final class EntityFlags {
    *       It might be OK if you can somehow ensure that only a single device will create new IDs.
    */
   public static final int SHARED_GLOBAL_IDS = 4;
-
-  public static final String[] names = { "USE_NO_ARG_CONSTRUCTOR", "SYNC_ENABLED", "", "SHARED_GLOBAL_IDS", };
-
-  public static String name(int e) { return names[e - USE_NO_ARG_CONSTRUCTOR]; }
 }
 

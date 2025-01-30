@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -124,7 +124,7 @@ public class Transaction implements Closeable {
 
             // If store is already closed natively, destroying the tx would cause EXCEPTION_ACCESS_VIOLATION
             // TODO not destroying is probably only a small leak on rare occasions, but still could be fixed
-            if (!store.isClosed()) {
+            if (!store.isNativeStoreClosed()) {
                 nativeDestroy(transaction);
             }
         }
@@ -184,7 +184,7 @@ public class Transaction implements Closeable {
         EntityInfo<T> entityInfo = store.getEntityInfo(entityClass);
         CursorFactory<T> factory = entityInfo.getCursorFactory();
         long cursorHandle = nativeCreateCursor(transaction, entityInfo.getDbName(), entityClass);
-        if(cursorHandle == 0) throw new DbException("Could not create native cursor");
+        if (cursorHandle == 0) throw new DbException("Could not create native cursor");
         return factory.createCursor(this, cursorHandle, store);
     }
 
@@ -193,8 +193,7 @@ public class Transaction implements Closeable {
     }
 
     public boolean isActive() {
-        checkOpen();
-        return nativeIsActive(transaction);
+        return !closed && nativeIsActive(transaction);
     }
 
     public boolean isRecycled() {

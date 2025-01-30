@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 ObjectBox Ltd. All rights reserved.
+ * Copyright 2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,9 +46,5 @@ public final class OrderFlags {
    * null values should be treated equal to zero (scalars only).
    */
   public static final int NULLS_ZERO = 16;
-
-  public static final String[] names = { "DESCENDING", "CASE_SENSITIVE", "", "UNSIGNED", "", "", "", "NULLS_LAST", "", "", "", "", "", "", "", "NULLS_ZERO", };
-
-  public static String name(int e) { return names[e - DESCENDING]; }
 }
 

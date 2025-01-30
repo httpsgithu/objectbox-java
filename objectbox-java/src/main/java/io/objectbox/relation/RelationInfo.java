@@ -25,6 +25,8 @@ import io.objectbox.Property;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.internal.ToManyGetter;
 import io.objectbox.internal.ToOneGetter;
+import io.objectbox.query.QueryCondition;
+import io.objectbox.query.RelationCountCondition;
 
 /**
  * Meta info describing a relation including source and target entity.
@@ -44,16 +46,16 @@ public class RelationInfo<SOURCE, TARGET> implements Serializable {
     public final int targetRelationId;
 
     /** Only set for ToOne relations */
-    public final ToOneGetter<SOURCE> toOneGetter;
+    public final ToOneGetter<SOURCE, TARGET> toOneGetter;
 
     /** Only set for ToMany relations */
-    public final ToManyGetter<SOURCE> toManyGetter;
+    public final ToManyGetter<SOURCE, TARGET> toManyGetter;
 
     /** For ToMany relations based on ToOne backlinks (null otherwise). */
-    public final ToOneGetter<TARGET> backlinkToOneGetter;
+    public final ToOneGetter<TARGET, SOURCE> backlinkToOneGetter;
 
     /** For ToMany relations based on ToMany backlinks (null otherwise). */
-    public final ToManyGetter<TARGET> backlinkToManyGetter;
+    public final ToManyGetter<TARGET, SOURCE> backlinkToManyGetter;
 
     /** For stand-alone to-many relations (0 otherwise). */
     public final int relationId;
@@ -62,7 +64,7 @@ public class RelationInfo<SOURCE, TARGET> implements Serializable {
      * ToOne
      */
     public RelationInfo(EntityInfo<SOURCE> sourceInfo, EntityInfo<TARGET> targetInfo, Property<SOURCE> targetIdProperty,
-                        ToOneGetter<SOURCE> toOneGetter) {
+                        ToOneGetter<SOURCE, TARGET> toOneGetter) {
         this.sourceInfo = sourceInfo;
         this.targetInfo = targetInfo;
         this.targetIdProperty = targetIdProperty;
@@ -77,8 +79,8 @@ public class RelationInfo<SOURCE, TARGET> implements Serializable {
     /**
      * ToMany as a ToOne backlink
      */
-    public RelationInfo(EntityInfo<SOURCE> sourceInfo, EntityInfo<TARGET> targetInfo, ToManyGetter<SOURCE> toManyGetter,
-                        Property<TARGET> targetIdProperty, ToOneGetter<TARGET> backlinkToOneGetter) {
+    public RelationInfo(EntityInfo<SOURCE> sourceInfo, EntityInfo<TARGET> targetInfo, ToManyGetter<SOURCE, TARGET> toManyGetter,
+                        Property<TARGET> targetIdProperty, ToOneGetter<TARGET, SOURCE> backlinkToOneGetter) {
         this.sourceInfo = sourceInfo;
         this.targetInfo = targetInfo;
         this.targetIdProperty = targetIdProperty;
@@ -93,8 +95,8 @@ public class RelationInfo<SOURCE, TARGET> implements Serializable {
     /**
      * ToMany as a ToMany backlink
      */
-    public RelationInfo(EntityInfo<SOURCE> sourceInfo, EntityInfo<TARGET> targetInfo, ToManyGetter<SOURCE> toManyGetter,
-            ToManyGetter<TARGET> backlinkToManyGetter, int targetRelationId) {
+    public RelationInfo(EntityInfo<SOURCE> sourceInfo, EntityInfo<TARGET> targetInfo, ToManyGetter<SOURCE, TARGET> toManyGetter,
+                        ToManyGetter<TARGET, SOURCE> backlinkToManyGetter, int targetRelationId) {
         this.sourceInfo = sourceInfo;
         this.targetInfo = targetInfo;
         this.toManyGetter = toManyGetter;
@@ -109,7 +111,7 @@ public class RelationInfo<SOURCE, TARGET> implements Serializable {
     /**
      * Stand-alone ToMany.
      */
-    public RelationInfo(EntityInfo<SOURCE> sourceInfo, EntityInfo<TARGET> targetInfo, ToManyGetter<SOURCE> toManyGetter,
+    public RelationInfo(EntityInfo<SOURCE> sourceInfo, EntityInfo<TARGET> targetInfo, ToManyGetter<SOURCE, TARGET> toManyGetter,
                         int relationId) {
         this.sourceInfo = sourceInfo;
         this.targetInfo = targetInfo;
@@ -129,6 +131,32 @@ public class RelationInfo<SOURCE, TARGET> implements Serializable {
     @Override
     public String toString() {
         return "RelationInfo from " + sourceInfo.getEntityClass() + " to " + targetInfo.getEntityClass();
+    }
+
+    /**
+     * Creates a condition to match objects that have {@code relationCount} related objects pointing to them.
+     * <pre>
+     * try (Query&lt;Customer&gt; query = customerBox
+     *         .query(Customer_.orders.relationCount(2))
+     *         .build()) {
+     *     List&lt;Customer&gt; customersWithTwoOrders = query.find();
+     * }
+     * </pre>
+     * {@code relationCount} may be 0 to match objects that do not have related objects.
+     * It typically should be a low number.
+     * <p>
+     * This condition has some limitations:
+     * <ul>
+     *     <li>only 1:N (ToMany using @Backlink) relations are supported,</li>
+     *     <li>the complexity is {@code O(n * (relationCount + 1))} and cannot be improved via indexes,</li>
+     *     <li>the relation count cannot be changed with setParameter once the query is built.</li>
+     * </ul>
+     */
+    public QueryCondition<SOURCE> relationCount(int relationCount) {
+        if (targetIdProperty == null) {
+            throw new IllegalStateException("The relation count condition is only supported for 1:N (ToMany using @Backlink) relations.");
+        }
+        return new RelationCountCondition<>(this, relationCount);
     }
 }
 

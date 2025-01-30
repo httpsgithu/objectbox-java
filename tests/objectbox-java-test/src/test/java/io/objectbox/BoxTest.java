@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,14 +22,17 @@ import org.junit.Test;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
+
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 public class BoxTest extends AbstractObjectBoxTest {
@@ -51,6 +54,11 @@ public class BoxTest extends AbstractObjectBoxTest {
         assertTrue(id != 0);
         assertEquals(id, entity.getId());
 
+        short valShort = 100 + simpleInt;
+        long valLong = 1000 + simpleInt;
+        float valFloat = 200 + simpleInt / 10f;
+        double valDouble = 2000 + simpleInt / 100f;
+
         TestEntity entityRead = box.get(id);
         assertNotNull(entityRead);
         assertEquals(id, entityRead.getId());
@@ -58,10 +66,10 @@ public class BoxTest extends AbstractObjectBoxTest {
         assertEquals(simpleInt, entityRead.getSimpleInt());
         assertEquals((byte) (10 + simpleInt), entityRead.getSimpleByte());
         assertFalse(entityRead.getSimpleBoolean());
-        assertEquals((short) (100 + simpleInt), entityRead.getSimpleShort());
-        assertEquals(1000 + simpleInt, entityRead.getSimpleLong());
-        assertEquals(200 + simpleInt / 10f, entityRead.getSimpleFloat(), 0);
-        assertEquals(2000 + simpleInt / 100f, entityRead.getSimpleDouble(), 0);
+        assertEquals(valShort, entityRead.getSimpleShort());
+        assertEquals(valLong, entityRead.getSimpleLong());
+        assertEquals(valFloat, entityRead.getSimpleFloat(), 0);
+        assertEquals(valDouble, entityRead.getSimpleDouble(), 0);
         assertArrayEquals(new byte[]{1, 2, (byte) simpleInt}, entityRead.getSimpleByteArray());
         String[] expectedStringArray = new String[]{simpleString};
         assertArrayEquals(expectedStringArray, entityRead.getSimpleStringArray());
@@ -72,6 +80,34 @@ public class BoxTest extends AbstractObjectBoxTest {
         assertEquals(1, entityRead.getStringObjectMap().size());
         assertEquals(simpleString, entityRead.getStringObjectMap().get(simpleString));
         assertEquals(simpleString, entityRead.getFlexProperty());
+        assertArrayEquals(new short[]{(short) -valShort, valShort}, entity.getShortArray());
+        assertArrayEquals(simpleString.toCharArray(), entity.getCharArray());
+        assertArrayEquals(new int[]{-simpleInt, simpleInt}, entity.getIntArray());
+        assertArrayEquals(new long[]{-valLong, valLong}, entity.getLongArray());
+        assertArrayEquals(new float[]{-valFloat, valFloat}, entityRead.getFloatArray(), 0);
+        assertArrayEquals(new double[]{-valDouble, valDouble}, entity.getDoubleArray(), 0);
+        assertEquals(new Date(1000 + simpleInt), entity.getDate());
+    }
+
+    // Note: There is a similar test using the Cursor API directly (which is deprecated) in CursorTest.
+    @Test
+    public void testPut_notAssignedId_fails() {
+        TestEntity entity = new TestEntity();
+        // Set ID that was not assigned
+        entity.setId(1);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> box.put(entity));
+        assertEquals("ID is higher or equal to internal ID sequence: 1 (vs. 1). Use ID 0 (zero) to insert new objects.", ex.getMessage());
+    }
+
+    @Test
+    public void testPut_assignedId_inserts() {
+        long id = box.put(new TestEntity());
+        box.remove(id);
+        // Put with previously assigned ID should insert
+        TestEntity entity = new TestEntity();
+        entity.setId(id);
+        box.put(entity);
+        assertEquals(1L, box.count());
     }
 
     @Test
@@ -95,6 +131,13 @@ public class BoxTest extends AbstractObjectBoxTest {
         assertEquals(0, defaultEntity.getSimpleLongU());
         assertNull(defaultEntity.getStringObjectMap());
         assertNull(defaultEntity.getFlexProperty());
+        assertNull(defaultEntity.getShortArray());
+        assertNull(defaultEntity.getCharArray());
+        assertNull(defaultEntity.getIntArray());
+        assertNull(defaultEntity.getLongArray());
+        assertNull(defaultEntity.getFloatArray());
+        assertNull(defaultEntity.getDoubleArray());
+        assertNull(defaultEntity.getDate());
     }
 
     @Test

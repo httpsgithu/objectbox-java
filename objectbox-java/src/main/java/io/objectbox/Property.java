@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,13 @@
 
 package io.objectbox;
 
+import java.io.Serializable;
+import java.util.Collection;
+import java.util.Date;
+
+import javax.annotation.Nullable;
+
+import io.objectbox.annotation.HnswIndex;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.converter.PropertyConverter;
 import io.objectbox.exception.DbException;
@@ -27,21 +34,18 @@ import io.objectbox.query.PropertyQueryConditionImpl.IntArrayCondition;
 import io.objectbox.query.PropertyQueryConditionImpl.LongArrayCondition;
 import io.objectbox.query.PropertyQueryConditionImpl.LongCondition;
 import io.objectbox.query.PropertyQueryConditionImpl.LongLongCondition;
+import io.objectbox.query.PropertyQueryConditionImpl.NearestNeighborCondition;
 import io.objectbox.query.PropertyQueryConditionImpl.NullCondition;
 import io.objectbox.query.PropertyQueryConditionImpl.StringArrayCondition;
 import io.objectbox.query.PropertyQueryConditionImpl.StringCondition;
 import io.objectbox.query.PropertyQueryConditionImpl.StringCondition.Operation;
 import io.objectbox.query.PropertyQueryConditionImpl.StringStringCondition;
+import io.objectbox.query.Query;
 import io.objectbox.query.QueryBuilder.StringOrder;
-
-import javax.annotation.Nullable;
-import java.io.Serializable;
-import java.util.Collection;
-import java.util.Date;
 
 /**
  * Meta data describing a Property of an ObjectBox Entity.
- * Properties are typically used when defining {@link io.objectbox.query.Query Query} conditions
+ * Properties are typically used when defining {@link Query Query} conditions
  * using {@link io.objectbox.query.QueryBuilder QueryBuilder}.
  * Access properties using the generated underscore class of an entity (e.g. {@code Example_.id}).
  */
@@ -60,7 +64,8 @@ public class Property<ENTITY> implements Serializable {
     public final boolean isId;
     public final boolean isVirtual;
     public final String dbName;
-    @SuppressWarnings("rawtypes") // Use raw type of PropertyConverter to allow users to supply a generic implementation.
+    @SuppressWarnings("rawtypes")
+    // Use raw type of PropertyConverter to allow users to supply a generic implementation.
     public final Class<? extends PropertyConverter> converterClass;
 
     /** Type, which is converted to a type supported by the DB. */
@@ -83,14 +88,16 @@ public class Property<ENTITY> implements Serializable {
         this(entity, ordinal, id, type, name, isId, dbName, null, null);
     }
 
-    @SuppressWarnings("rawtypes") // Use raw type of PropertyConverter to allow users to supply a generic implementation.
+    @SuppressWarnings("rawtypes")
+    // Use raw type of PropertyConverter to allow users to supply a generic implementation.
     public Property(EntityInfo<ENTITY> entity, int ordinal, int id, Class<?> type, String name, boolean isId,
                     @Nullable String dbName, @Nullable Class<? extends PropertyConverter> converterClass,
                     @Nullable Class<?> customType) {
         this(entity, ordinal, id, type, name, isId, false, dbName, converterClass, customType);
     }
 
-    @SuppressWarnings("rawtypes") // Use raw type of PropertyConverter to allow users to supply a generic implementation.
+    @SuppressWarnings("rawtypes")
+    // Use raw type of PropertyConverter to allow users to supply a generic implementation.
     public Property(EntityInfo<ENTITY> entity, int ordinal, int id, Class<?> type, String name, boolean isId,
                     boolean isVirtual, @Nullable String dbName,
                     @Nullable Class<? extends PropertyConverter> converterClass, @Nullable Class<?> customType) {
@@ -298,6 +305,25 @@ public class Property<ENTITY> implements Serializable {
                 lowerBoundary, upperBoundary);
     }
 
+    /**
+     * Performs an approximate nearest neighbor (ANN) search to find objects near to the given {@code queryVector}.
+     * <p>
+     * This requires the vector property to have an {@link HnswIndex}.
+     * <p>
+     * The dimensions of the query vector should be at least the dimensions of this vector property.
+     * <p>
+     * Use {@code maxResultCount} to set the maximum number of objects to return by the ANN condition. Hint: it can also
+     * be used as the "ef" HNSW parameter to increase the search quality in combination with a query limit. For example,
+     * use maxResultCount of 100 with a Query limit of 10 to have 10 results that are of potentially better quality than
+     * just passing in 10 for maxResultCount (quality/performance tradeoff).
+     * <p>
+     * To change the given parameters after building the query, use {@link Query#setParameter(Property, float[])} and
+     * {@link Query#setParameter(Property, long)} or their alias equivalent.
+     */
+    public PropertyQueryCondition<ENTITY> nearestNeighbors(float[] queryVector, int maxResultCount) {
+        return new NearestNeighborCondition<>(this, queryVector, maxResultCount);
+    }
+
     /** Creates an "equal ('=')" condition for this property. */
     public PropertyQueryCondition<ENTITY> equal(Date value) {
         return new LongCondition<>(this, LongCondition.Operation.EQUAL, value);
@@ -326,6 +352,16 @@ public class Property<ENTITY> implements Serializable {
     /** Creates a "less or equal ('&lt;=')" condition for this property. */
     public PropertyQueryCondition<ENTITY> lessOrEqual(Date value) {
         return new LongCondition<>(this, LongCondition.Operation.LESS_OR_EQUAL, value);
+    }
+
+    /** Creates an "IN (..., ..., ...)" condition for this property. */
+    public PropertyQueryCondition<ENTITY> oneOf(Date[] value) {
+        return new LongArrayCondition<>(this, LongArrayCondition.Operation.IN, value);
+    }
+
+    /** Creates a "NOT IN (..., ..., ...)" condition for this property. */
+    public PropertyQueryCondition<ENTITY> notOneOf(Date[] value) {
+        return new LongArrayCondition<>(this, LongArrayCondition.Operation.NOT_IN, value);
     }
 
     /**

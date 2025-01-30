@@ -110,10 +110,10 @@ public class Order_ implements EntityInfo<Order> {
         }
     }
 
-    static final RelationInfo<Order, Customer> customer = new RelationInfo<>(Order_.__INSTANCE, Customer_.__INSTANCE, customerId, new ToOneGetter<Order>() {
+    public static final RelationInfo<Order, Customer> customer = new RelationInfo<>(Order_.__INSTANCE, Customer_.__INSTANCE, customerId, new ToOneGetter<Order, Customer>() {
         @Override
         public ToOne<Customer> getToOne(Order object) {
-            return object.customer__toOne;
+            return object.getCustomer();
         }
     });
 

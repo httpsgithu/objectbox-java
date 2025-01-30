@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2024 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,29 +16,39 @@
 
 package io.objectbox;
 
-import io.objectbox.ModelBuilder.EntityBuilder;
-import io.objectbox.ModelBuilder.PropertyBuilder;
-import io.objectbox.annotation.IndexType;
-import io.objectbox.model.PropertyFlags;
-import io.objectbox.model.PropertyType;
 import org.junit.After;
 import org.junit.Before;
 
-import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
-import static org.junit.Assert.assertArrayEquals;
+import javax.annotation.Nullable;
+
+import io.objectbox.ModelBuilder.EntityBuilder;
+import io.objectbox.ModelBuilder.PropertyBuilder;
+import io.objectbox.annotation.IndexType;
+import io.objectbox.config.DebugFlags;
+import io.objectbox.model.PropertyFlags;
+import io.objectbox.model.PropertyType;
+
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public abstract class AbstractObjectBoxTest {
 
@@ -46,6 +56,11 @@ public abstract class AbstractObjectBoxTest {
      * Turns on additional log output, including logging of transactions or query parameters.
      */
     protected static final boolean DEBUG_LOG = false;
+
+    /**
+     * If instead of files the database should be in memory.
+     */
+    protected static final boolean IN_MEMORY = Objects.equals(System.getProperty("obx.inMemory"), "true");
     private static boolean printedVersionsOnce;
 
     protected File boxStoreDir;
@@ -86,7 +101,10 @@ public abstract class AbstractObjectBoxTest {
             System.out.println("ObjectBox Java version: " + BoxStore.getVersion());
             System.out.println("ObjectBox Core version: " + BoxStore.getVersionNative());
             System.out.println("First DB dir: " + boxStoreDir);
+            System.out.println("IN_MEMORY=" + IN_MEMORY);
             System.out.println("java.version=" + System.getProperty("java.version"));
+            System.out.println("file.encoding=" + System.getProperty("file.encoding"));
+            System.out.println("sun.jnu.encoding=" + System.getProperty("sun.jnu.encoding"));
         }
 
         store = createBoxStore();
@@ -97,11 +115,19 @@ public abstract class AbstractObjectBoxTest {
      * This works with Android without needing any context.
      */
     protected File prepareTempDir(String prefix) throws IOException {
-        File tempFile = File.createTempFile(prefix, "");
-        if (!tempFile.delete()) {
-            throw new IOException("Could not prep temp dir; file delete failed for " + tempFile.getAbsolutePath());
+        if (IN_MEMORY) {
+            // Instead of random temp directory, use random suffix for each test to avoid re-using existing database
+            // from other tests in case clean-up fails.
+            // Note: tearDown code will still work as the directory does not exist.
+            String randomPart = Long.toUnsignedString(random.nextLong());
+            return new File(BoxStore.IN_MEMORY_PREFIX + prefix + randomPart);
+        } else {
+            File tempFile = File.createTempFile(prefix, "");
+            if (!tempFile.delete()) {
+                throw new IOException("Could not prep temp dir; file delete failed for " + tempFile.getAbsolutePath());
+            }
+            return tempFile;
         }
-        return tempFile;
     }
 
     protected BoxStore createBoxStore() {
@@ -152,26 +178,29 @@ public abstract class AbstractObjectBoxTest {
                 logError("Could not clean up test", e);
             }
         }
-        deleteAllFiles();
+        cleanUpAllFiles(boxStoreDir);
     }
 
-    protected void deleteAllFiles() {
+    /**
+     * Manually clean up any leftover files to prevent interference with other tests.
+     */
+    protected void cleanUpAllFiles(@Nullable File boxStoreDir) {
         if (boxStoreDir != null && boxStoreDir.exists()) {
-            File[] files = boxStoreDir.listFiles();
-            for (File file : files) {
-                delete(file);
+            try (Stream<Path> stream = Files.walk(boxStoreDir.toPath())) {
+                stream.sorted(Comparator.reverseOrder())
+                        .forEach(path -> {
+                            try {
+                                Files.delete(path);
+                            } catch (IOException e) {
+                                logError("Could not delete file", e);
+                                fail("Could not delete file");
+                            }
+                        });
+            } catch (IOException e) {
+                logError("Could not delete file", e);
+                fail("Could not delete file");
             }
-            delete(boxStoreDir);
         }
-    }
-
-    private boolean delete(File file) {
-        boolean deleted = file.delete();
-        if (!deleted) {
-            file.deleteOnExit();
-            logError("Could not delete " + file.getAbsolutePath());
-        }
-        return deleted;
     }
 
     protected void log(String text) {
@@ -208,6 +237,13 @@ public abstract class AbstractObjectBoxTest {
         modelBuilder.lastEntityId(lastEntityId, lastEntityUid);
         modelBuilder.lastIndexId(lastIndexId, lastIndexUid);
         return modelBuilder.build();
+    }
+
+    /**
+     * When not using the {@link #store} of this to create a builder with the default test model.
+     */
+    protected BoxStoreBuilder createBuilderWithTestModel() {
+        return new BoxStoreBuilder(createTestModel(null));
     }
 
     private void addTestEntity(ModelBuilder modelBuilder, @Nullable IndexType simpleStringIndexType) {
@@ -256,7 +292,18 @@ public abstract class AbstractObjectBoxTest {
                 .id(TestEntity_.stringObjectMap.id, ++lastUid);
         entityBuilder.property("flexProperty", PropertyType.Flex).id(TestEntity_.flexProperty.id, ++lastUid);
 
-        int lastId = TestEntity_.flexProperty.id;
+        // Integer and floating point arrays
+        entityBuilder.property("shortArray", PropertyType.ShortVector).id(TestEntity_.shortArray.id, ++lastUid);
+        entityBuilder.property("charArray", PropertyType.CharVector).id(TestEntity_.charArray.id, ++lastUid);
+        entityBuilder.property("intArray", PropertyType.IntVector).id(TestEntity_.intArray.id, ++lastUid);
+        entityBuilder.property("longArray", PropertyType.LongVector).id(TestEntity_.longArray.id, ++lastUid);
+        entityBuilder.property("floatArray", PropertyType.FloatVector).id(TestEntity_.floatArray.id, ++lastUid);
+        entityBuilder.property("doubleArray", PropertyType.DoubleVector).id(TestEntity_.doubleArray.id, ++lastUid);
+
+        // Date property
+        entityBuilder.property("date", PropertyType.Date).id(TestEntity_.date.id, ++lastUid);
+
+        int lastId = TestEntity_.date.id;
         entityBuilder.lastPropertyId(lastId, lastUid);
         addOptionalFlagsToTestEntity(entityBuilder);
         entityBuilder.entityDone();
@@ -303,14 +350,21 @@ public abstract class AbstractObjectBoxTest {
             entity.setStringObjectMap(stringObjectMap);
         }
         entity.setFlexProperty(simpleString);
+        entity.setShortArray(new short[]{(short) -(100 + nr), entity.getSimpleShort()});
+        entity.setCharArray(simpleString != null ? simpleString.toCharArray() : null);
+        entity.setIntArray(new int[]{-entity.getSimpleInt(), entity.getSimpleInt()});
+        entity.setLongArray(new long[]{-entity.getSimpleLong(), entity.getSimpleLong()});
+        entity.setFloatArray(new float[]{-entity.getSimpleFloat(), entity.getSimpleFloat()});
+        entity.setDoubleArray(new double[]{-entity.getSimpleDouble(), entity.getSimpleDouble()});
+        entity.setDate(new Date(1000 + nr));
         return entity;
     }
 
     protected TestEntity putTestEntity(@Nullable String simpleString, int nr) {
         TestEntity entity = createTestEntity(simpleString, nr);
-        long key = getTestEntityBox().put(entity);
-        assertTrue(key != 0);
-        assertEquals(key, entity.getId());
+        long id = getTestEntityBox().put(entity);
+        assertTrue(id != 0);
+        assertEquals(id, entity.getId());
         return entity;
     }
 

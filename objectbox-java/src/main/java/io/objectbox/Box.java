@@ -28,6 +28,8 @@ import java.util.concurrent.Callable;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
+import io.objectbox.annotation.Backlink;
+import io.objectbox.annotation.Id;
 import io.objectbox.annotation.apihint.Beta;
 import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
@@ -38,6 +40,8 @@ import io.objectbox.internal.ReflectionCache;
 import io.objectbox.query.QueryBuilder;
 import io.objectbox.query.QueryCondition;
 import io.objectbox.relation.RelationInfo;
+import io.objectbox.relation.ToMany;
+import io.objectbox.relation.ToOne;
 
 /**
  * A Box to put and get Objects of a specific Entity class.
@@ -302,6 +306,7 @@ public class Box<T> {
 
     /**
      * Returns all stored Objects in this Box.
+     *
      * @return since 2.4 the returned list is always mutable (before an empty result list was immutable)
      */
     public List<T> getAll() {
@@ -320,8 +325,9 @@ public class Box<T> {
     /**
      * Check if an object with the given ID exists in the database.
      * This is more efficient than a {@link #get(long)} and comparing against null.
+     *
+     * @return true if an object with the given ID was found, false otherwise.
      * @since 2.7
-     * @return true if a object with the given ID was found, false otherwise
      */
     public boolean contains(long id) {
         Cursor<T> reader = getReader();
@@ -333,12 +339,25 @@ public class Box<T> {
     }
 
     /**
-     * Puts the given object in the box (aka persisting it). If this is a new entity (its ID property is 0), a new ID
-     * will be assigned to the entity (and returned). If the entity was already put in the box before, it will be
-     * overwritten.
+     * Puts the given object and returns its (new) ID.
      * <p>
-     * Performance note: if you want to put several entities, consider {@link #put(Collection)},
-     * {@link #put(Object[])}, {@link BoxStore#runInTx(Runnable)}, etc. instead.
+     * This means that if its {@link Id @Id} property is 0 or null, it is inserted as a new object and assigned the next
+     * available ID. For example, if there is an object with ID 1 and another with ID 100, it will be assigned ID 101.
+     * The new ID is also set on the given object before this returns.
+     * <p>
+     * If instead the object has an assigned ID set, if an object with the same ID exists it is updated. Otherwise, it
+     * is inserted with that ID.
+     * <p>
+     * If the ID was not assigned before an {@link IllegalArgumentException} is thrown.
+     * <p>
+     * When the object contains {@link ToOne} or {@link ToMany} relations, they are created (or updated) to point to the
+     * (new) target objects. The target objects themselves are typically not updated or removed. To do so, put or remove
+     * them using their {@link Box}. However, for convenience, if a target object is new, it will be inserted and
+     * assigned an ID in its Box before creating or updating the relation. Also, for ToMany relations based on a
+     * {@link Backlink} the target objects are updated (to store changes in the linked ToOne or ToMany relation).
+     * <p>
+     * Performance note: if you want to put several objects, consider {@link #put(Collection)}, {@link #put(Object[])},
+     * {@link BoxStore#runInTx(Runnable)}, etc. instead.
      */
     public long put(T entity) {
         Cursor<T> cursor = getWriter();
@@ -353,6 +372,8 @@ public class Box<T> {
 
     /**
      * Puts the given entities in a box using a single transaction.
+     * <p>
+     * See {@link #put(Object)} for more details.
      */
     @SafeVarargs // Not using T... as Object[], no ClassCastException expected.
     public final void put(@Nullable T... entities) {
@@ -373,6 +394,8 @@ public class Box<T> {
 
     /**
      * Puts the given entities in a box using a single transaction.
+     * <p>
+     * See {@link #put(Object)} for more details.
      *
      * @param entities It is fine to pass null or an empty collection:
      *                 this case is handled efficiently without overhead.
@@ -395,6 +418,8 @@ public class Box<T> {
 
     /**
      * Puts the given entities in a box in batches using a separate transaction for each batch.
+     * <p>
+     * See {@link #put(Object)} for more details.
      *
      * @param entities  It is fine to pass null or an empty collection:
      *                  this case is handled efficiently without overhead.
@@ -424,8 +449,11 @@ public class Box<T> {
     }
 
     /**
-     * Removes (deletes) the Object by its ID.
-     * @return true if an entity was actually removed (false if no entity exists with the given ID)
+     * Removes (deletes) the object with the given ID.
+     * <p>
+     * If the object is part of a relation, it will be removed from that relation as well.
+     *
+     * @return true if the object did exist and was removed, otherwise false.
      */
     public boolean remove(long id) {
         Cursor<T> cursor = getWriter();
@@ -440,7 +468,7 @@ public class Box<T> {
     }
 
     /**
-     * Removes (deletes) Objects by their ID in a single transaction.
+     * Like {@link #remove(long)}, but removes multiple objects in a single transaction.
      */
     public void remove(@Nullable long... ids) {
         if (ids == null || ids.length == 0) {
@@ -467,7 +495,7 @@ public class Box<T> {
     }
 
     /**
-     * Due to type erasure collision, we cannot simply use "remove" as a method name here.
+     * Like {@link #remove(long)}, but removes multiple objects in a single transaction.
      */
     public void removeByIds(@Nullable Collection<Long> ids) {
         if (ids == null || ids.isEmpty()) {
@@ -485,8 +513,7 @@ public class Box<T> {
     }
 
     /**
-     * Removes (deletes) the given Object.
-     * @return true if an entity was actually removed (false if no entity exists with the given ID)
+     * Like {@link #remove(long)}, but obtains the ID from the {@link Id @Id} property of the given object instead.
      */
     public boolean remove(T object) {
         Cursor<T> cursor = getWriter();
@@ -502,7 +529,7 @@ public class Box<T> {
     }
 
     /**
-     * Removes (deletes) the given Objects in a single transaction.
+     * Like {@link #remove(Object)}, but removes multiple objects in a single transaction.
      */
     @SafeVarargs // Not using T... as Object[], no ClassCastException expected.
     @SuppressWarnings("Duplicates") // Detected duplicate has different type
@@ -523,7 +550,7 @@ public class Box<T> {
     }
 
     /**
-     * Removes (deletes) the given Objects in a single transaction.
+     * Like {@link #remove(Object)}, but removes multiple objects in a single transaction.
      */
     @SuppressWarnings("Duplicates") // Detected duplicate has different type
     public void remove(@Nullable Collection<T> objects) {
@@ -543,7 +570,7 @@ public class Box<T> {
     }
 
     /**
-     * Removes (deletes) ALL Objects in a single transaction.
+     * Like {@link #remove(long)}, but removes <b>all</b> objects in a single transaction.
      */
     public void removeAll() {
         Cursor<T> cursor = getWriter();
@@ -567,15 +594,15 @@ public class Box<T> {
     }
 
     /**
-     * Returns a builder to create queries for Object matching supplied criteria.
+     * Create a query with no conditions.
+     *
+     * @see #query(QueryCondition)
      */
     public QueryBuilder<T> query() {
-        return new QueryBuilder<>(this, store.internalHandle(), store.getDbName(entityClass));
+        return new QueryBuilder<>(this, store.getNativeStore(), store.getDbName(entityClass));
     }
 
     /**
-     * Experimental. This API might change or be removed in the future based on user feedback.
-     * <p>
      * Applies the given query conditions and returns the builder for further customization, such as result order.
      * Build the condition using the properties from your entity underscore classes.
      * <p>
@@ -595,7 +622,6 @@ public class Box<T> {
      *
      * @see QueryBuilder#apply(QueryCondition)
      */
-    @Experimental
     public QueryBuilder<T> query(QueryCondition<T> queryCondition) {
         return query().apply(queryCondition);
     }
